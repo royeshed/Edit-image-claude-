@@ -12,18 +12,18 @@ for _i in range(len(_d)):
 TS=np.concatenate([[0],np.cumsum(_u)]); TS=TS/TS[-1]*(len(_F)-1)/24; IDX=np.arange(len(TS))
 fps=24; W,H=752,560; OW,OH=960,720
 SRC=float(TS[-1]); JOINS=(float(TS[96]),float(TS[191]),float(TS[286])); BASE=1.3; DEC_AT=float(TS[286])+6.2; DT=1/2400
-src=0.0; t=0.0; decay_t=None; ts=[]; ss=[]
+src=0.0; t=0.0; decay_t=None; ts=[]; ss=[]; vv=[]
 while True:
     d=min(abs(src-j) for j in JOINS); s=BASE*(0.5+0.5*min(1,d/0.55)**1.5)
     if src>=DEC_AT:
-        decay_t=t if decay_t is None else decay_t; x=min(1,(t-decay_t)/3.4); s=0.05+(BASE-0.05)*(1-x)**1.5
-    ts.append(t); ss.append(src); src+=s*DT; t+=DT
+        decay_t=t if decay_t is None else decay_t; x=min(1,(t-decay_t)/3.2); s=0.22+(BASE-0.22)*(1-x)**2
+    ts.append(t); ss.append(src); vv.append(s); src+=s*DT; t+=DT
     if src>=SRC-0.06: break
-T_END=t+0.9; N=int(round(T_END*fps)); ts=np.array(ts); ss=np.array(ss)
+T_END=t+0.35; N=int(round(T_END*fps)); ts=np.array(ts); ss=np.array(ss); vv=np.array(vv)
 print('duration %.2f  decel starts %.2f'%(T_END,decay_t))
-open('fast_timing.txt','w').write('%.3f %.3f\n'%(T_END,decay_t))
+open('natural_timing.txt','w').write('%.3f %.3f\n'%(T_END,decay_t))
 dec=subprocess.Popen([FF,'-v','error','-i','chain4.mp4','-vf',f'minterpolate=fps={HI}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1','-f','rawvideo','-pix_fmt','rgb24','-'],stdout=subprocess.PIPE)
-enc=subprocess.Popen([FF,'-v','error','-y','-f','rawvideo','-pix_fmt','rgb24','-s',f'{OW}x{OH}','-r',str(fps),'-i','-','-c:v','libx264','-crf','13','-preset','slow','-pix_fmt','yuv420p','fast4.mp4'],stdin=subprocess.PIPE)
+enc=subprocess.Popen([FF,'-v','error','-y','-f','rawvideo','-pix_fmt','rgb24','-s',f'{OW}x{OH}','-r',str(fps),'-i','-','-c:v','libx264','-crf','13','-preset','slow','-pix_fmt','yuv420p','natural4.mp4'],stdin=subprocess.PIPE)
 cur=-1; buf=None
 for k in range(N):
     want=int(round(np.interp(np.interp(k/fps,ts,ss),TS,IDX)*HI/24))
@@ -31,5 +31,13 @@ for k in range(N):
         b=dec.stdout.read(W*H*3)
         if len(b)<W*H*3: break
         buf=b; cur+=1
-    enc.stdin.write(Image.frombuffer('RGB',(W,H),buf,'raw','RGB',0,1).resize((OW,OH),Image.LANCZOS).tobytes())
+    tt_=k/fps; sp=float(np.interp(tt_,ts,vv))/BASE
+    nx=0.55*np.sin(2*np.pi*0.23*tt_+0.7)+0.30*np.sin(2*np.pi*0.61*tt_+2.1)+0.15*np.sin(2*np.pi*1.37*tt_+4.0)
+    ny=0.50*np.sin(2*np.pi*0.19*tt_+1.9)+0.30*np.sin(2*np.pi*0.53*tt_+0.3)+0.20*np.sin(2*np.pi*1.21*tt_+3.3)
+    nr=0.6*np.sin(2*np.pi*0.17*tt_+0.9)+0.4*np.sin(2*np.pi*0.47*tt_+2.6)
+    dx=2.2*nx; dy=1.8*ny+0.9*sp*np.sin(2*np.pi*1.75*tt_); rot=np.deg2rad(0.14*nr)
+    im=Image.frombuffer('RGB',(W,H),buf,'raw','RGB',0,1).resize((OW,OH),Image.LANCZOS)
+    sc=1.03; c,sn=np.cos(rot)/sc,np.sin(rot)/sc; cx,cy=OW/2,OH/2
+    a,b_=c,sn; d,e=-sn,c; cc=cx-a*(cx+dx)-b_*(cy+dy); f=cy-d*(cx+dx)-e*(cy+dy)
+    enc.stdin.write(im.transform((OW,OH),Image.AFFINE,(a,b_,cc,d,e,f),resample=Image.BICUBIC).tobytes())
 enc.stdin.close(); enc.wait(); dec.kill(); print('frames',N,'last',cur)
