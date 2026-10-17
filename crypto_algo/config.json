@@ -54,6 +54,11 @@
     "exits": [
       10,
       20
-    ]
+    ],
+    "confirm_tfs": [
+      "1d"
+    ],
+    "confirm": "close>ema50",
+    "confirm_mode": "gate"
   }
 }

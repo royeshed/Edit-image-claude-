@@ -66,3 +66,30 @@ def test_breakout_weights_follow_channels():
     assert (w >= 0).all() and (w <= 1 / len(w) + 1e-12).all()
     assert w["C0/USDT"] == pytest.approx(1 / 3)   # strong uptrend: all 6 systems long
     assert w["C1/USDT"] == 0                       # downtrend: flat
+
+
+def test_htf_confirmation_blocks_entries_against_the_daily_structure():
+    from algo.trend_portfolio import breakout_weights
+
+    idx = pd.date_range("2024-01-01", periods=1200, freq="4h", tz="UTC")
+    rng = np.random.default_rng(1)
+    up = 100 * np.exp(np.cumsum(rng.normal(0.004, 0.01, len(idx))))
+    closes = pd.DataFrame({"A/USDT": up, "B/USDT": up[::-1].copy()}, index=idx)
+    bars = {"close": closes, "high": closes * 1.002, "low": closes * 0.998}
+    plain = PortfolioConfig(strategy="breakout", symbols=list(closes.columns))
+    conf = PortfolioConfig(strategy="breakout", symbols=list(closes.columns), confirm_tfs=("1d",), confirm_mode="gate")
+    assert breakout_weights(bars, conf)["A/USDT"] > 0            # uptrend confirmed by daily higher lows
+    assert breakout_weights(bars, conf)["B/USDT"] == 0
+    assert (breakout_weights(bars, conf) <= breakout_weights(bars, plain) + 1e-12).all()  # confirmation only removes exposure
+
+
+def test_htf_alignment_never_uses_an_unclosed_daily_candle():
+    from algo.htf import align, resample
+
+    idx = pd.date_range("2024-01-01", periods=60, freq="4h", tz="UTC")
+    closes = pd.DataFrame({"X": np.arange(60, dtype=float)}, index=idx)
+    d = resample({"close": closes, "high": closes, "low": closes}, "1d")["close"]
+    a = align(d, idx, "1d")
+    # The 4h bar labelled 20:00 closes at midnight: first bar that may see that day's close.
+    assert a.loc["2024-01-01 20:00", "X"] == closes.loc["2024-01-01 20:00", "X"]
+    assert np.isnan(a.loc["2024-01-01 16:00", "X"])

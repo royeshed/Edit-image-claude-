@@ -10,6 +10,9 @@ Two strategies, both rebalanced with market orders to per-coin weights
 "breakout" (4h candles, at every candle close)
     size   = share of the Donchian systems (entry N-bar high, exit M-bar low) that are long,
              for N in `entries` x M in `exits` -> 0, 1/6, ..., 1
+    Optional higher-timeframe confirmation (`confirm_tfs`, e.g. ["1d"] or ["1d", "1w"]): a system
+    may only enter while `confirm` holds on every listed timeframe (closed candles only); with
+    `confirm_mode` "gate" it also exits when the confirmation fails.
 
 There are no stops: risk is controlled by sizing and by going to cash when trends end.
 """
@@ -24,6 +27,7 @@ import pandas as pd
 
 from .broker import OrderRejected
 from .data import fetch_ohlcv
+from .htf import confirmation, confirmed_breakouts
 
 log = logging.getLogger(__name__)
 
@@ -43,6 +47,9 @@ class PortfolioConfig:
     min_trade_usd: float = 10.0    # skip rebalancing trades smaller than this
     entries: tuple = (50, 100, 200)  # breakout: entry channel lengths (4h bars)
     exits: tuple = (10, 20)          # breakout: exit channel lengths (4h bars)
+    confirm_tfs: tuple = ()          # breakout: higher-timeframe confirmation, e.g. ("1d",) or ("1d", "1w"); () = off
+    confirm: str = "higher-lows"     # higher-lows | close>ema20 | close>ema50 | ema10>ema30 | donchian20/10 | momentum
+    confirm_mode: str = "entry"      # "entry" (filter entries) or "gate" (also exit when confirmation fails)
     state_file: str = "portfolio_state.json"
 
     @property
@@ -52,7 +59,10 @@ class PortfolioConfig:
     @property
     def history_hours(self) -> int:
         if self.strategy == "breakout":
-            return (max(self.entries) * 4 + 50) * 4  # enough 4h bars for the channel state to settle
+            hours = (max(self.entries) * 4 + 50) * 4  # enough 4h bars for the channel state to settle
+            if "1w" in self.confirm_tfs:
+                hours = max(hours, 24 * 7 * 60)       # ~60 weekly candles for weekly swing structure
+            return hours
         return self.base_hours * 4 + 24
 
 
@@ -60,18 +70,12 @@ def ensemble_signal(close: pd.DataFrame, base: int, mults=(0.25, 0.5, 1, 2, 4)) 
     return sum(np.sign(close / close.shift(int(base * m)) - 1) for m in mults) / len(mults)
 
 
-def breakout_state(close: pd.DataFrame, high: pd.DataFrame, low: pd.DataFrame, n: int, m: int) -> pd.DataFrame:
-    """1 from a close above the prior n-bar high until a close below the prior m-bar low."""
-    entry = close > high.rolling(n).max().shift()
-    exit_ = close < low.rolling(m).min().shift()
-    s = pd.DataFrame(np.where(exit_, 0.0, np.where(entry, 1.0, np.nan)), index=close.index, columns=close.columns)
-    return s.ffill().fillna(0.0)
-
-
 def breakout_weights(bars: dict[str, pd.DataFrame], cfg: PortfolioConfig) -> pd.Series:
     """Weights from 4h close/high/low panels whose last row is the just-closed candle."""
-    c, h, l = bars["close"], bars["high"], bars["low"]
-    size = sum(breakout_state(c, h, l, n, m) for n in cfg.entries for m in cfg.exits) / (len(cfg.entries) * len(cfg.exits))
+    c = bars["close"]
+    systems = [(n, m) for n in cfg.entries for m in cfg.exits]
+    confirm = confirmation(bars, c.index, cfg.confirm_tfs, cfg.confirm) if cfg.confirm_tfs else None
+    size = confirmed_breakouts(bars, systems, confirm, cfg.confirm_mode)
     live = c.iloc[-1].notna()
     return (size.iloc[-1] / live.sum()).where(live, 0.0)
 
