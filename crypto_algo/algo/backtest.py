@@ -11,7 +11,7 @@ import pandas as pd
 
 from .config import Config
 from .risk import Position, position_size, trail_stop
-from .strategy import EmaRsiTrendStrategy
+from .strategy import make_strategy
 
 PERIODS_PER_YEAR = {"1m": 525_600, "5m": 105_120, "15m": 35_040, "30m": 17_520,
                     "1h": 8_760, "4h": 2_190, "1d": 365}
@@ -40,7 +40,7 @@ class BacktestResult:
 
 
 def run_backtest(df: pd.DataFrame, cfg: Config) -> BacktestResult:
-    strat = EmaRsiTrendStrategy(cfg.strategy)
+    strat = make_strategy(cfg.strategy)
     data = strat.compute(df)
     fee, slip = cfg.costs.fee_rate, cfg.costs.slippage
 

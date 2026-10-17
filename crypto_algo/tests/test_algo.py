@@ -62,14 +62,28 @@ def test_backtest_runs_and_is_consistent(df):
         assert t.exit_time >= t.entry_time
 
 
-def test_backtest_has_no_lookahead(df):
+@pytest.mark.parametrize("name", ["ema_rsi", "donchian"])
+def test_backtest_has_no_lookahead(df, name):
     """Changing future bars must not change decisions made before them."""
     cut = 2000
-    full = run_backtest(df, Config())
+    cfg = Config()
+    cfg.strategy.name = name
+    full = run_backtest(df, cfg)
     altered = df.copy()
     altered.iloc[cut:, :4] *= 1.5
-    part = run_backtest(altered, Config())
+    part = run_backtest(altered, cfg)
     pd.testing.assert_series_equal(full.equity.iloc[: cut - 1], part.equity.iloc[: cut - 1])
+
+
+def test_take_profit_can_be_disabled():
+    qty, stop, tp = position_size(10_000, 100, 1, RiskConfig(reward_risk=0))
+    assert qty > 0 and tp == float("inf")
+
+
+def test_donchian_trades(df):
+    cfg = Config()
+    cfg.strategy.name = "donchian"
+    assert run_backtest(df, cfg).stats["trades"] > 0
 
 
 def test_fees_reduce_returns(df):

@@ -24,7 +24,8 @@ def position_size(equity: float, price: float, atr_value: float, cfg: RiskConfig
         return 0.0, 0.0, 0.0
     qty = equity * cfg.risk_per_trade / stop_dist
     qty = min(qty, equity * cfg.max_position_pct / price)
-    return qty, price - stop_dist, price + cfg.reward_risk * stop_dist
+    take_profit = price + cfg.reward_risk * stop_dist if cfg.reward_risk > 0 else float("inf")
+    return qty, price - stop_dist, take_profit
 
 
 def trail_stop(pos: Position, high: float, atr_value: float, cfg: RiskConfig) -> None:

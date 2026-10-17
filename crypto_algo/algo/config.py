@@ -5,6 +5,7 @@ from pathlib import Path
 
 @dataclass
 class StrategyConfig:
+    name: str = "ema_rsi"             # "ema_rsi" or "donchian"
     ema_fast: int = 20
     ema_slow: int = 50
     ema_trend: int = 200
@@ -12,13 +13,15 @@ class StrategyConfig:
     rsi_min: float = 45
     rsi_max: float = 70
     atr_period: int = 14
+    donchian_entry: int = 55          # breakout above the highest high of N bars
+    donchian_exit: int = 20           # exit below the lowest low of N bars
 
 
 @dataclass
 class RiskConfig:
     risk_per_trade: float = 0.01      # fraction of equity lost if the stop is hit
     atr_stop_mult: float = 2.0        # initial stop distance in ATRs
-    reward_risk: float = 2.5          # take-profit distance as a multiple of the stop distance
+    reward_risk: float = 2.5          # take-profit distance as a multiple of the stop distance (0 disables)
     trailing_atr_mult: float = 3.0    # trailing stop in ATRs (0 disables)
     max_position_pct: float = 0.95    # never put more than this fraction of equity in one position
     max_daily_loss: float = 0.03      # halt new entries for the day after this drawdown

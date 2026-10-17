@@ -16,7 +16,7 @@ import pandas as pd
 from .config import Config
 from .data import to_frame
 from .risk import Position, position_size, trail_stop
-from .strategy import EmaRsiTrendStrategy
+from .strategy import make_strategy
 
 log = logging.getLogger(__name__)
 
@@ -26,7 +26,7 @@ class Trader:
         self.cfg = cfg
         self.ex = exchange
         self.broker = broker
-        self.strategy = EmaRsiTrendStrategy(cfg.strategy)
+        self.strategy = make_strategy(cfg.strategy)
         self.state_path = Path(cfg.state_file)
         self.position: Position | None = None
         self.last_candle: str | None = None

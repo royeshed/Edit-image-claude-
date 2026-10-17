@@ -1,32 +1,31 @@
 {
   "exchange": "binance",
   "symbol": "BTC/USDT",
-  "timeframe": "1h",
-
+  "timeframe": "4h",
   "strategy": {
+    "name": "donchian",
+    "donchian_entry": 20,
+    "donchian_exit": 10,
+    "ema_trend": 200,
+    "atr_period": 14,
     "ema_fast": 20,
     "ema_slow": 50,
-    "ema_trend": 200,
     "rsi_period": 14,
     "rsi_min": 45,
-    "rsi_max": 70,
-    "atr_period": 14
+    "rsi_max": 70
   },
-
   "risk": {
-    "risk_per_trade": 0.01,
-    "atr_stop_mult": 2.0,
-    "reward_risk": 2.5,
-    "trailing_atr_mult": 3.0,
+    "risk_per_trade": 0.02,
+    "atr_stop_mult": 3.0,
+    "reward_risk": 4.0,
+    "trailing_atr_mult": 4.0,
     "max_position_pct": 0.95,
     "max_daily_loss": 0.03
   },
-
   "costs": {
     "fee_rate": 0.001,
     "slippage": 0.0005
   },
-
   "initial_capital": 10000,
   "poll_seconds": 30,
   "state_file": "state.json"
