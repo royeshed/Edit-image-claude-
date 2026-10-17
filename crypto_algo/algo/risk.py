@@ -14,6 +14,7 @@ class Position:
     highest: float = 0.0
     stop_order_id: str | None = None   # protective stop resting on the exchange (live only)
     side: int = 1                      # 1 long, -1 short; `highest` is the best price seen in our favour
+    entry_fee: float = 0.0             # fee paid on entry (backtest bookkeeping)
 
 
 def position_size(equity: float, price: float, atr_value: float, cfg: RiskConfig) -> tuple[float, float, float]:

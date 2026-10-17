@@ -22,20 +22,20 @@ def data(coin, tf):
         _cache[k] = d5 if tf == "5m" else resample(d5, tf)
     return _cache[k]
 
-def cfg_for(tf, fee=0.0005, slip=0.0002, **strat):
+def cfg_for(tf, fee=0.0005, slip=0.0002, maker=None, **strat):
     c = Config.load("config.json")
     risk = strat.pop("risk", {})
     return replace(c, timeframe=tf, strategy=replace(c.strategy, name="ict_mtf", **strat),
                    risk=replace(c.risk, **{**dict(risk_per_trade=0.01, reward_risk=2.0, trailing_atr_mult=0,
                                                  max_position_pct=3.0, max_daily_loss=0.05), **risk}),
-                   costs=replace(c.costs, fee_rate=fee, slippage=slip))
+                   costs=replace(c.costs, fee_rate=fee, slippage=slip, maker_fee=maker))
 
 def evaluate(coin, tf, period="train", **kw):
     df = data(coin, tf)
     df = df[df.index < SPLIT] if period == "train" else df[df.index >= SPLIT - pd.Timedelta(days=30)]
     out = {}
-    for label, fee, slip in (("gross", 0, 0), ("net", 0.0005, 0.0002)):
-        r = run_backtest(df, cfg_for(tf, fee, slip, **kw))
+    for label, fee, slip, maker in (("gross", 0, 0, 0), ("net", 0.0005, 0.0002, 0.0002)):
+        r = run_backtest(df, cfg_for(tf, fee, slip, maker, **kw))
         eq = r.equity if period == "train" else r.equity[r.equity.index >= SPLIT]
         tr = r.trades if period == "train" else [t for t in r.trades if t.entry_time >= SPLIT]
         wins = sum(t.pnl > 0 for t in tr)

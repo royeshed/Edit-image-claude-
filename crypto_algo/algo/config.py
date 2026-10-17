@@ -24,6 +24,9 @@ class StrategyConfig:
     fvg_max_age: int = 24             # bars an FVG stays tradable
     setup_lookback: int = 8           # setup-timeframe bars a liquidity sweep stays valid
     allow_shorts: bool = True
+    entry: str = "market"             # "market" on the trigger, or "limit" inside each new FVG
+    fvg_min_atr: float = 0.3          # limit mode: ignore gaps smaller than this many ATRs
+    limit_level: float = 0.5          # limit mode: depth into the gap (0 = near edge, 0.5 = midpoint/CE)
 
 
 @dataclass
@@ -38,8 +41,9 @@ class RiskConfig:
 
 @dataclass
 class CostConfig:
-    fee_rate: float = 0.001
+    fee_rate: float = 0.001           # taker fee (market orders, stops)
     slippage: float = 0.0005
+    maker_fee: float | None = None    # limit orders (limit entries, take-profits); None = same as fee_rate
 
 
 @dataclass

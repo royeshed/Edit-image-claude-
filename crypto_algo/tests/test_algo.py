@@ -183,3 +183,40 @@ def test_short_trade_profits_when_price_falls():
         bt.make_strategy = orig
     assert len(res.trades) == 1 and res.trades[0].side == -1
     assert res.trades[0].pnl > 0 and res.equity.iloc[-1] > cfg.initial_capital
+
+
+def test_limit_entry_fills_only_when_price_trades_through():
+    import algo.backtest as bt
+
+    idx = pd.date_range("2024-01-01", periods=60, freq="1h", tz="UTC")
+    close = np.full(60, 100.0)
+    df = pd.DataFrame({"open": close, "high": close + 1, "low": close - 1, "close": close, "volume": 1.0}, index=idx)
+    df.iloc[20, df.columns.get_loc("low")] = 97.0  # only bar 20 reaches the 97.5 limit
+
+    def strat(limit):
+        class S:
+            warmup = 0
+
+            def compute(self, d):
+                out = d.copy()
+                out["atr"] = 1.0
+                out["long_entry"] = False
+                out.iloc[10, out.columns.get_loc("long_entry")] = True
+                out["limit_long"], out["stop_long"] = limit, 90.0
+                out.attrs["limit_bars"] = 15
+                return out
+        return S()
+
+    orig = bt.make_strategy
+    try:
+        cfg = Config()
+        cfg.risk.reward_risk = 0
+        cfg.risk.trailing_atr_mult = 0
+        bt.make_strategy = lambda c: strat(97.5)
+        hit = bt.run_backtest(df, cfg)
+        bt.make_strategy = lambda c: strat(96.0)  # never reached
+        miss = bt.run_backtest(df, cfg)
+    finally:
+        bt.make_strategy = orig
+    assert len(hit.trades) == 1 and hit.trades[0].entry_price == 97.5 and hit.trades[0].entry_time == idx[20]
+    assert miss.trades == []

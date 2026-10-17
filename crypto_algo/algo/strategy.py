@@ -129,6 +129,11 @@ class ICTMultiTimeframeStrategy:
         out["long_exit"] = bias["struct"] == -1
         out["short_exit"] = bias["struct"] == 1
 
+        if c.entry == "limit":
+            self._limit_entries(out, bl, bs, setup, session)
+            out["entry"], out["exit"] = out["long_entry"], out["long_exit"]
+            return out
+
         lo, hi = 0.5 * out["atr"], 4 * out["atr"]
         dist_l = (out["close"] - (st["swing_low"] - 0.1 * out["atr"])).clip(lower=lo, upper=hi)
         dist_s = ((st["swing_high"] + 0.1 * out["atr"]) - out["close"]).clip(lower=lo, upper=hi)
@@ -136,6 +141,30 @@ class ICTMultiTimeframeStrategy:
         out["stop_short"] = out["close"] + dist_s
         out["entry"], out["exit"] = out["long_entry"], out["long_exit"]  # for long-only consumers
         return out
+
+    def _limit_entries(self, out, bias_long, bias_short, setup, session) -> None:
+        """A fresh displacement FVG in the bias direction places a limit order inside the gap.
+
+        Bullish gap at bar i: [high[i-2], low[i]]. Limit at `limit_level` depth (0.5 = CE),
+        stop below the displacement candle's low, valid for `fvg_max_age` bars.
+        """
+        c = self.cfg
+        a = out["atr"]
+        h2, l2 = out["high"].shift(2), out["low"].shift(2)
+        bull = (out["low"] - h2) >= c.fvg_min_atr * a
+        bear = (l2 - out["high"]) >= c.fvg_min_atr * a
+        lim_l = out["low"] - c.limit_level * (out["low"] - h2)
+        lim_s = out["high"] + c.limit_level * (l2 - out["high"])
+        stop_l = out["low"].shift(1).combine(h2, min) - 0.1 * a
+        stop_s = out["high"].shift(1).combine(l2, max) + 0.1 * a
+        lo, hi = 0.5 * a, 4 * a
+        out["limit_long"] = lim_l
+        out["limit_short"] = lim_s
+        out["stop_long"] = lim_l - (lim_l - stop_l).clip(lower=lo, upper=hi)
+        out["stop_short"] = lim_s + (stop_s - lim_s).clip(lower=lo, upper=hi)
+        out["long_entry"] = bias_long & setup["long"].fillna(False).astype(bool) & bull & session
+        out["short_entry"] = bias_short & setup["short"].fillna(False).astype(bool) & bear & session & c.allow_shorts
+        out.attrs["limit_bars"] = c.fvg_max_age
 
 
 STRATEGIES = {"ema_rsi": EmaRsiTrendStrategy, "donchian": DonchianBreakoutStrategy,
