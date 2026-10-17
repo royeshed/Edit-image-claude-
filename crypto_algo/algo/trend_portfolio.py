@@ -13,6 +13,10 @@ Two strategies, both rebalanced with market orders to per-coin weights
     Optional higher-timeframe confirmation (`confirm_tfs`, e.g. ["1d"] or ["1d", "1w"]): a system
     may only enter while `confirm` holds on every listed timeframe (closed candles only); with
     `confirm_mode` "gate" it also exits when the confirmation fails.
+    Capital allocation: with `top_k` > 0 only the k coins with the best `rank_days` return among
+    those whose signal is on are held; weights are size / max(sum of held sizes, `max_slots`), so
+    `max_slots` is the risk dial (each coin gets at most 1/max_slots of equity). With top_k = 0 and
+    max_slots = 0 every coin keeps a fixed 1/N sleeve.
 
 There are no stops: risk is controlled by sizing and by going to cash when trends end.
 """
@@ -50,6 +54,9 @@ class PortfolioConfig:
     confirm_tfs: tuple = ()          # breakout: higher-timeframe confirmation, e.g. ("1d",) or ("1d", "1w"); () = off
     confirm: str = "higher-lows"     # higher-lows | close>ema20 | close>ema50 | ema10>ema30 | donchian20/10 | momentum
     confirm_mode: str = "entry"      # "entry" (filter entries) or "gate" (also exit when confirmation fails)
+    top_k: int = 0                   # breakout: hold only the k strongest coins in a trend (0 = all)
+    rank_days: int = 14              # breakout: momentum window used to rank coins for top_k
+    max_slots: float = 0             # breakout: risk dial, max weight per coin = 1/max_slots (0 = number of coins)
     state_file: str = "portfolio_state.json"
 
     @property
@@ -75,9 +82,16 @@ def breakout_weights(bars: dict[str, pd.DataFrame], cfg: PortfolioConfig) -> pd.
     c = bars["close"]
     systems = [(n, m) for n in cfg.entries for m in cfg.exits]
     confirm = confirmation(bars, c.index, cfg.confirm_tfs, cfg.confirm) if cfg.confirm_tfs else None
-    size = confirmed_breakouts(bars, systems, confirm, cfg.confirm_mode)
+    size = confirmed_breakouts(bars, systems, confirm, cfg.confirm_mode).iloc[-1]
     live = c.iloc[-1].notna()
-    return (size.iloc[-1] / live.sum()).where(live, 0.0)
+    size = size.where(live, 0.0)
+    if cfg.top_k:
+        bars_back = cfg.rank_days * 6  # 4h bars
+        mom = (c.iloc[-1] / c.iloc[-1 - bars_back] - 1).where(size > 0) if len(c) > bars_back else size * np.nan
+        keep = mom.rank(ascending=False, method="first") <= cfg.top_k
+        size = size.where(keep, 0.0)
+    slots = cfg.max_slots or live.sum()
+    return size / max(size.sum(), slots)
 
 
 def target_weights(closes: pd.DataFrame, cfg: PortfolioConfig) -> pd.Series:

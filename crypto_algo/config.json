@@ -39,7 +39,22 @@
       "ADA/USDT",
       "DOGE/USDT",
       "SOL/USDT",
-      "AVAX/USDT"
+      "AVAX/USDT",
+      "LINK/USDT",
+      "LTC/USDT",
+      "DOT/USDT",
+      "TRX/USDT",
+      "XLM/USDT",
+      "BCH/USDT",
+      "ATOM/USDT",
+      "UNI/USDT",
+      "NEAR/USDT",
+      "AAVE/USDT",
+      "SHIB/USDT",
+      "ETC/USDT",
+      "FIL/USDT",
+      "HBAR/USDT",
+      "PEPE/USDT"
     ],
     "base_hours": 480,
     "decide_hour": 13,
@@ -59,6 +74,9 @@
       "1d"
     ],
     "confirm": "close>ema50",
-    "confirm_mode": "gate"
+    "confirm_mode": "gate",
+    "top_k": 3,
+    "rank_days": 14,
+    "max_slots": 8
   }
 }

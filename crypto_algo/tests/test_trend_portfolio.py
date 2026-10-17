@@ -93,3 +93,18 @@ def test_htf_alignment_never_uses_an_unclosed_daily_candle():
     # The 4h bar labelled 20:00 closes at midnight: first bar that may see that day's close.
     assert a.loc["2024-01-01 20:00", "X"] == closes.loc["2024-01-01 20:00", "X"]
     assert np.isnan(a.loc["2024-01-01 16:00", "X"])
+
+
+def test_top_k_holds_only_the_strongest_trending_coins():
+    from algo.trend_portfolio import breakout_weights
+
+    idx = pd.date_range("2024-01-01", periods=1200, freq="4h", tz="UTC")
+    t = np.arange(len(idx))
+    closes = pd.DataFrame({f"C{i}/USDT": 100 * np.exp(t * d) for i, d in enumerate((0.004, 0.003, 0.002, 0.001, -0.002))}, index=idx)
+    bars = {"close": closes, "high": closes, "low": closes}
+    cfg = PortfolioConfig(strategy="breakout", symbols=list(closes.columns), top_k=2, max_slots=4)
+    w = breakout_weights(bars, cfg)
+    assert set(w[w > 0].index) == {"C0/USDT", "C1/USDT"}       # the two strongest uptrends
+    assert w.max() <= 1 / 4 + 1e-12 and w.sum() <= 1 + 1e-12   # risk dial caps each coin
+    plain = breakout_weights(bars, PortfolioConfig(strategy="breakout", symbols=list(closes.columns)))
+    assert plain["C3/USDT"] == pytest.approx(1 / 5)            # default: fixed 1/N sleeves
