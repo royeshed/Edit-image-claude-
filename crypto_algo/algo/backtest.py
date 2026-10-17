@@ -134,6 +134,8 @@ def compute_stats(eq: pd.Series, trades: list[Trade], close: pd.Series, cfg: Con
         "win_rate": len(wins) / len(trades) if trades else 0.0,
         "profit_factor": sum(wins) / -sum(losses) if losses and sum(losses) < 0 else float("inf"),
         "avg_trade": float(np.mean([t.return_pct for t in trades])) if trades else 0.0,
+        "avg_hold_hours": float(np.mean([(t.exit_time - t.entry_time).total_seconds() / 3600 for t in trades]))
+        if trades else 0.0,
         "final_equity": eq.iloc[-1],
     }
 
