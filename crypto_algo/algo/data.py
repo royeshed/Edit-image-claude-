@@ -1,4 +1,5 @@
 """Market data: download OHLCV from an exchange (with CSV cache) or generate synthetic data."""
+import os
 import time
 from pathlib import Path
 
@@ -8,13 +9,28 @@ import pandas as pd
 COLUMNS = ["open", "high", "low", "close", "volume"]
 
 
+# Binance's official market-data mirror; reachable from regions where api.binance.com is not.
+BINANCE_PUBLIC_DATA = "https://data-api.binance.vision/api/v3"
+
+
 def make_exchange(name: str, api_key: str | None = None, secret: str | None = None):
     import ccxt
 
     params = {"enableRateLimit": True}
     if api_key and secret:
         params.update(apiKey=api_key, secret=secret)
-    return getattr(ccxt, name)(params)
+    elif name == "binance":
+        params["options"] = {"fetchMarkets": ["spot"]}
+    ex = getattr(ccxt, name)(params)
+    if name == "binance" and not api_key:
+        ex.urls["api"]["public"] = BINANCE_PUBLIC_DATA
+    # Honour an HTTPS proxy and custom CA bundle from the environment (ccxt ignores them by default).
+    if os.environ.get("HTTPS_PROXY"):
+        ex.https_proxy = os.environ["HTTPS_PROXY"]
+    ca = os.environ.get("REQUESTS_CA_BUNDLE") or os.environ.get("SSL_CERT_FILE")
+    if ca:
+        ex.session.verify = ca
+    return ex
 
 
 def to_frame(rows: list[list]) -> pd.DataFrame:
