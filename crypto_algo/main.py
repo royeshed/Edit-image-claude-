@@ -6,6 +6,8 @@
   python main.py scan --days 2000               # many coins x timeframes in one table
   python main.py replay --csv data/x.csv        # run the live loop over history (paper)
   python main.py paper                          # live market data, simulated orders
+  python main.py portfolio-paper                # RESEARCH WINNER: multi-coin trend portfolio, simulated
+  python main.py portfolio-live --i-understand-the-risk   # same, real spot orders
   python main.py live --i-understand-the-risk   # REAL orders (needs API keys in env)
 """
 import argparse
@@ -108,6 +110,28 @@ def cmd_optimize(args, cfg: Config) -> None:
     print("\nPick parameters that hold up on the TEST columns, not just the best train score.")
 
 
+def cmd_portfolio(args, cfg: Config, live: bool) -> None:
+    import json
+
+    from algo.trend_portfolio import LivePortfolioBroker, PaperPortfolioBroker, PortfolioConfig, PortfolioTrader
+
+    raw = json.loads(open(args.config).read()).get("portfolio", {})
+    pcfg = PortfolioConfig(**raw)
+    if live:
+        if not args.i_understand_the_risk:
+            sys.exit("Refusing to trade real money without --i-understand-the-risk")
+        key, secret = os.environ.get("EXCHANGE_API_KEY"), os.environ.get("EXCHANGE_API_SECRET")
+        if not (key and secret):
+            sys.exit("Set EXCHANGE_API_KEY and EXCHANGE_API_SECRET (trade-only keys, no withdrawals)")
+        exchange = make_exchange(cfg.exchange, key, secret)
+        broker = LivePortfolioBroker(exchange)
+    else:
+        exchange = make_exchange(cfg.exchange)
+        broker = PaperPortfolioBroker(cfg.initial_capital, cfg.costs.fee_rate, cfg.costs.slippage)
+        pcfg.state_file = "paper_" + pcfg.state_file
+    PortfolioTrader(pcfg, exchange, broker).run()
+
+
 def cmd_trade(args, cfg: Config, live: bool) -> None:
     from algo.broker import LiveBroker, PaperBroker
     from algo.live import Trader
@@ -129,7 +153,7 @@ def cmd_trade(args, cfg: Config, live: bool) -> None:
 
 def main() -> None:
     p = argparse.ArgumentParser(description="Crypto algo trading bot")
-    p.add_argument("command", choices=["backtest", "optimize", "scan", "replay", "paper", "live"])
+    p.add_argument("command", choices=["backtest", "optimize", "scan", "replay", "paper", "live", "portfolio-paper", "portfolio-live"])
     p.add_argument("--config", default="config.json")
     p.add_argument("--symbol", help="override config symbol, e.g. ETH/USDT")
     p.add_argument("--timeframe", help="override config timeframe, e.g. 4h")
@@ -160,6 +184,8 @@ def main() -> None:
         cmd_scan(args, cfg)
     elif args.command == "replay":
         cmd_replay(args, cfg)
+    elif args.command.startswith("portfolio"):
+        cmd_portfolio(args, cfg, live=args.command == "portfolio-live")
     else:
         cmd_trade(args, cfg, live=args.command == "live")
 

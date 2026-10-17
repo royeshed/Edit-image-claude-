@@ -28,5 +28,22 @@
   },
   "initial_capital": 10000,
   "poll_seconds": 30,
-  "state_file": "state.json"
+  "state_file": "state.json",
+  "portfolio": {
+    "symbols": [
+      "BTC/USDT",
+      "ETH/USDT",
+      "BNB/USDT",
+      "XRP/USDT",
+      "ADA/USDT",
+      "DOGE/USDT",
+      "SOL/USDT",
+      "AVAX/USDT"
+    ],
+    "base_hours": 480,
+    "decide_hour": 13,
+    "target_vol": 0.5,
+    "cap": 1.0,
+    "min_trade_usd": 10.0
+  }
 }
