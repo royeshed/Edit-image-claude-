@@ -15,6 +15,15 @@ class StrategyConfig:
     atr_period: int = 14
     donchian_entry: int = 55          # breakout above the highest high of N bars
     donchian_exit: int = 20           # exit below the lowest low of N bars
+    # ICT multi-timeframe ("ict_mtf"): bias on bias_tf, setup on setup_tf, trigger on the base timeframe.
+    bias_tf: str = "1h"
+    setup_tf: str = "15m"
+    swing_n: int = 3                  # fractal size for swing points (bars each side)
+    trigger: str = "either"           # "choch", "fvg" or "either"
+    use_killzone: bool = True         # only enter during London / New York sessions
+    fvg_max_age: int = 24             # bars an FVG stays tradable
+    setup_lookback: int = 8           # setup-timeframe bars a liquidity sweep stays valid
+    allow_shorts: bool = True
 
 
 @dataclass

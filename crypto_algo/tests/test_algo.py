@@ -62,12 +62,13 @@ def test_backtest_runs_and_is_consistent(df):
         assert t.exit_time >= t.entry_time
 
 
-@pytest.mark.parametrize("name", ["ema_rsi", "donchian"])
+@pytest.mark.parametrize("name", ["ema_rsi", "donchian", "ict_mtf"])
 def test_backtest_has_no_lookahead(df, name):
     """Changing future bars must not change decisions made before them."""
     cut = 2000
     cfg = Config()
     cfg.strategy.name = name
+    cfg.strategy.bias_tf = cfg.strategy.setup_tf = "4h"
     full = run_backtest(df, cfg)
     altered = df.copy()
     altered.iloc[cut:, :4] *= 1.5
@@ -135,3 +136,50 @@ def test_replay_matches_backtest_roughly():
     eq = replay(df, cfg)
     bt = run_backtest(df, cfg).equity.loc[eq.index]
     assert abs(eq.iloc[-1] / bt.iloc[-1] - 1) < 0.05
+
+
+def test_mtf_align_has_no_lookahead():
+    from algo.mtf import align, resample
+
+    df = synthetic_ohlcv(bars=600, freq="5min", seed=4)
+    h1 = align(resample(df, "1h")["close"], df.index, "1h")
+    # The 1h bar opening 10:00 closes at 11:00, i.e. with the 5m bar labelled 10:55.
+    t = df.index[df.index.hour == 10][0].normalize() + pd.Timedelta(hours=10)
+    assert pd.isna(h1.get(t + pd.Timedelta(minutes=50))) or h1[t + pd.Timedelta(minutes=50)] != df.loc[t + pd.Timedelta(minutes=55), "close"]
+    assert h1[t + pd.Timedelta(minutes=55)] == df.loc[t + pd.Timedelta(minutes=55), "close"]
+    altered = df.copy()
+    altered.iloc[400:, :4] *= 2
+    h1b = align(resample(altered, "1h")["close"], df.index, "1h")
+    pd.testing.assert_series_equal(h1.iloc[:400], h1b.iloc[:400])
+
+
+def test_short_trade_profits_when_price_falls():
+    from algo.backtest import run_backtest as rb
+
+    idx = pd.date_range("2024-01-01", periods=300, freq="1h", tz="UTC")
+    close = np.concatenate([np.full(250, 100.0), np.linspace(100, 80, 50)])
+    df = pd.DataFrame({"open": close, "high": close + 0.5, "low": close - 0.5, "close": close, "volume": 1.0}, index=idx)
+
+    class Short:
+        warmup = 0
+
+        def compute(self, d):
+            out = d.copy()
+            out["atr"] = 1.0
+            out["short_entry"] = False
+            out.iloc[249, out.columns.get_loc("short_entry")] = True
+            return out
+
+    import algo.backtest as bt
+    orig = bt.make_strategy
+    bt.make_strategy = lambda cfg: Short()
+    try:
+        cfg = Config()
+        cfg.risk.reward_risk = 0
+        cfg.risk.trailing_atr_mult = 0
+        cfg.risk.atr_stop_mult = 5
+        res = rb(df, cfg)
+    finally:
+        bt.make_strategy = orig
+    assert len(res.trades) == 1 and res.trades[0].side == -1
+    assert res.trades[0].pnl > 0 and res.equity.iloc[-1] > cfg.initial_capital

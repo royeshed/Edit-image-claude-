@@ -13,7 +13,7 @@ from .config import Config
 from .risk import Position, position_size, trail_stop
 from .strategy import make_strategy
 
-PERIODS_PER_YEAR = {"1m": 525_600, "5m": 105_120, "15m": 35_040, "30m": 17_520,
+PERIODS_PER_YEAR = {"1m": 525_600, "3m": 175_200, "5m": 105_120, "15m": 35_040, "30m": 17_520,
                     "1h": 8_760, "4h": 2_190, "1d": 365}
 
 
@@ -26,10 +26,11 @@ class Trade:
     qty: float
     pnl: float
     reason: str
+    side: int = 1
 
     @property
     def return_pct(self) -> float:
-        return self.exit_price / self.entry_price - 1
+        return self.side * (self.exit_price / self.entry_price - 1)
 
 
 @dataclass
@@ -39,72 +40,112 @@ class BacktestResult:
     stats: dict = field(default_factory=dict)
 
 
+def _signals(data: pd.DataFrame) -> dict[str, np.ndarray]:
+    """Long/short entry and exit arrays. Long-only strategies provide just `entry` / `exit`."""
+    false = np.zeros(len(data), dtype=bool)
+    get = lambda k, default: data[k].fillna(False).to_numpy(dtype=bool) if k in data else default
+    long_entry = get("long_entry", get("entry", false))
+    long_exit = get("long_exit", get("exit", false))
+    nan = np.full(len(data), np.nan)
+    return {
+        "long_entry": long_entry, "long_exit": long_exit,
+        "short_entry": get("short_entry", false), "short_exit": get("short_exit", false),
+        "stop_long": data["stop_long"].to_numpy() if "stop_long" in data else nan,
+        "stop_short": data["stop_short"].to_numpy() if "stop_short" in data else nan,
+    }
+
+
 def run_backtest(df: pd.DataFrame, cfg: Config) -> BacktestResult:
+    """Long and short, one position at a time, sized by risk to the stop.
+
+    Accounting is margin-style (like a futures account at 1x): fees are paid from cash
+    and equity is cash plus the open position's unrealised P&L. For a long-only strategy
+    this is equivalent to holding the coin.
+    """
     strat = make_strategy(cfg.strategy)
     data = strat.compute(df)
     fee, slip = cfg.costs.fee_rate, cfg.costs.slippage
+    sig = _signals(data)
 
     cash = cfg.initial_capital
     pos: Position | None = None
     trades: list[Trade] = []
     equity = np.empty(len(data))
     in_market = np.zeros(len(data), dtype=bool)
-    pending_entry = pending_exit = False
+    pending_side, pending_stop, pending_exit = 0, np.nan, False
 
     day, day_start_equity, halted = None, cash, False
 
     o, h, l, c = (data[k].to_numpy() for k in ("open", "high", "low", "close"))
     atr_v = data["atr"].to_numpy()
-    entries, exits = data["entry"].to_numpy(), data["exit"].to_numpy()
     idx = data.index
+
+    def mark(price: float) -> float:
+        return cash + (pos.side * pos.qty * (price - pos.entry_price) if pos else 0.0)
 
     def close_position(i: int, raw_price: float, reason: str) -> None:
         nonlocal cash, pos
-        price = raw_price * (1 - slip)
-        proceeds = pos.qty * price * (1 - fee)
-        cost = pos.qty * pos.entry_price * (1 + fee)
-        cash += proceeds
-        trades.append(Trade(pos.entry_time, idx[i], pos.entry_price, price, pos.qty, proceeds - cost, reason))
+        price = raw_price * (1 - slip * pos.side)
+        exit_fee = pos.qty * price * fee
+        gross = pos.side * pos.qty * (price - pos.entry_price)
+        cash += gross - exit_fee
+        entry_fee = pos.qty * pos.entry_price * fee
+        trades.append(Trade(pos.entry_time, idx[i], pos.entry_price, price, pos.qty,
+                            gross - exit_fee - entry_fee, reason, pos.side))
         pos = None
 
     for i in range(len(data)):
         # Daily loss kill switch.
         if idx[i].date() != day:
             day = idx[i].date()
-            day_start_equity = cash + (pos.qty * o[i] if pos else 0.0)
+            day_start_equity = mark(o[i])
             halted = False
 
         # 1. Fill orders decided on the previous close, at this bar's open.
         if pending_exit and pos:
             close_position(i, o[i], "signal")
-        if pending_entry and pos is None and not halted:
-            price = o[i] * (1 + slip)
-            qty, stop, tp = position_size(cash, price, atr_v[i - 1], cfg.risk)
-            qty = min(qty, cash / (price * (1 + fee)))
-            if qty > 0:
-                cash -= qty * price * (1 + fee)
-                pos = Position(qty, price, stop, tp, idx[i], highest=price)
-        pending_entry = pending_exit = False
+        if pending_side and pos is None and not halted:
+            side = pending_side
+            price = o[i] * (1 + slip * side)
+            stop = pending_stop if np.isfinite(pending_stop) else price - side * cfg.risk.atr_stop_mult * atr_v[i - 1]
+            dist = side * (price - stop)
+            if dist > 0:
+                equity_now = mark(price)
+                qty = min(equity_now * cfg.risk.risk_per_trade / dist, equity_now * cfg.risk.max_position_pct / price)
+                tp = price + side * cfg.risk.reward_risk * dist if cfg.risk.reward_risk > 0 else side * np.inf
+                cash -= qty * price * fee
+                pos = Position(qty, price, stop, tp, idx[i], highest=price, side=side)
+        pending_side, pending_stop, pending_exit = 0, np.nan, False
 
-        # 2. Intrabar stop / take-profit.
+        # 2. Intrabar stop / take-profit (stop assumed first if both are touched).
         if pos:
-            if l[i] <= pos.stop:
-                close_position(i, min(o[i], pos.stop), "stop")
-            elif h[i] >= pos.take_profit:
-                close_position(i, max(o[i], pos.take_profit), "take_profit")
+            if pos.side == 1:
+                if l[i] <= pos.stop:
+                    close_position(i, min(o[i], pos.stop), "stop")
+                elif h[i] >= pos.take_profit:
+                    close_position(i, max(o[i], pos.take_profit), "take_profit")
             else:
-                trail_stop(pos, h[i], atr_v[i], cfg.risk)
+                if h[i] >= pos.stop:
+                    close_position(i, max(o[i], pos.stop), "stop")
+                elif l[i] <= pos.take_profit:
+                    close_position(i, min(o[i], pos.take_profit), "take_profit")
+            if pos:
+                trail_stop(pos, h[i], atr_v[i], cfg.risk, low=l[i])
 
-        equity[i] = cash + (pos.qty * c[i] if pos else 0.0)
+        equity[i] = mark(c[i])
         in_market[i] = pos is not None
         if equity[i] <= day_start_equity * (1 - cfg.risk.max_daily_loss):
             halted = True
 
         # 3. Decide on this bar's close.
-        if pos and exits[i]:
-            pending_exit = True
-        elif pos is None and entries[i] and not halted:
-            pending_entry = True
+        if pos:
+            if (pos.side == 1 and sig["long_exit"][i]) or (pos.side == -1 and sig["short_exit"][i]):
+                pending_exit = True
+        elif not halted:
+            if sig["long_entry"][i]:
+                pending_side, pending_stop = 1, sig["stop_long"][i]
+            elif sig["short_entry"][i]:
+                pending_side, pending_stop = -1, sig["stop_short"][i]
 
     if pos:
         close_position(len(data) - 1, c[-1], "end")
@@ -131,6 +172,8 @@ def compute_stats(eq: pd.Series, trades: list[Trade], close: pd.Series, cfg: Con
         "max_drawdown": drawdown.min(),
         "sharpe": rets.mean() / rets.std() * np.sqrt(ppy) if rets.std() > 0 else 0.0,
         "trades": len(trades),
+        "longs": sum(t.side == 1 for t in trades),
+        "shorts": sum(t.side == -1 for t in trades),
         "win_rate": len(wins) / len(trades) if trades else 0.0,
         "profit_factor": sum(wins) / -sum(losses) if losses and sum(losses) < 0 else float("inf"),
         "avg_trade": float(np.mean([t.return_pct for t in trades])) if trades else 0.0,

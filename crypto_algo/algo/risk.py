@@ -13,6 +13,7 @@ class Position:
     entry_time: object = None
     highest: float = 0.0
     stop_order_id: str | None = None   # protective stop resting on the exchange (live only)
+    side: int = 1                      # 1 long, -1 short; `highest` is the best price seen in our favour
 
 
 def position_size(equity: float, price: float, atr_value: float, cfg: RiskConfig) -> tuple[float, float, float]:
@@ -29,8 +30,13 @@ def position_size(equity: float, price: float, atr_value: float, cfg: RiskConfig
     return qty, price - stop_dist, take_profit
 
 
-def trail_stop(pos: Position, high: float, atr_value: float, cfg: RiskConfig) -> None:
-    """Ratchet the stop up behind the highest price seen. Never moves it down."""
-    pos.highest = max(pos.highest, high)
-    if cfg.trailing_atr_mult > 0 and atr_value > 0:
-        pos.stop = max(pos.stop, pos.highest - cfg.trailing_atr_mult * atr_value)
+def trail_stop(pos: Position, high: float, atr_value: float, cfg: RiskConfig, low: float | None = None) -> None:
+    """Ratchet the stop behind the best price seen. It only ever moves in the trade's favour."""
+    if pos.side == 1:
+        pos.highest = max(pos.highest, high)
+        if cfg.trailing_atr_mult > 0 and atr_value > 0:
+            pos.stop = max(pos.stop, pos.highest - cfg.trailing_atr_mult * atr_value)
+    else:
+        pos.highest = min(pos.highest, low if low is not None else high)
+        if cfg.trailing_atr_mult > 0 and atr_value > 0:
+            pos.stop = min(pos.stop, pos.highest + cfg.trailing_atr_mult * atr_value)
