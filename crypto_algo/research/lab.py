@@ -19,17 +19,32 @@ PERIODS = {
     "test": (pd.Timestamp("2025-01-01", tz="UTC"), pd.Timestamp("2100-01-01", tz="UTC")),
 }
 COST = 0.0007  # futures taker 0.05% + 0.02% slippage, per side
-BARS_PER_YEAR = {"1h": 8760, "4h": 2190, "1d": 365}
+BARS_PER_YEAR = {"5m": 105120, "15m": 35040, "1h": 8760, "2h": 4380, "4h": 2190, "1d": 365}
+SPOT_COST = 0.0012  # spot taker 0.10% + 0.02% slippage, per side
 
 
-def load_panel(tf: str = "1h", coins=COINS) -> dict[str, pd.DataFrame]:
-    """OHLCV per field as (time x coin) frames on a common grid. The still-forming last bar is dropped."""
+def _freq(tf: str) -> str:
+    return tf.replace("m", "min").replace("d", "D")
+
+
+def load_panel(tf: str = "1h", coins=COINS, start: pd.Timestamp = START) -> dict[str, pd.DataFrame]:
+    """OHLCV per field as (time x coin) frames on a common grid. The still-forming last bar is dropped.
+
+    2h/4h panels are resampled from the hourly files; 15m comes from its own files.
+    """
+    src = "1h" if tf in ("2h", "4h", "6h", "12h") else tf
+    days = "1750d" if src in ("5m", "15m") else "3400d"
     frames = {}
+    agg = {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
     for c in coins:
-        d = pd.read_csv(DATA / f"binance_{c}-USDT_{tf}_3400d.csv", index_col=0)
+        d = pd.read_csv(DATA / f"binance_{c}-USDT_{src}_{days}.csv", index_col=0)
         d.index = pd.to_datetime(d.index, utc=True)
-        frames[c] = d.iloc[:-1]
-    grid = pd.date_range(START, max(f.index[-1] for f in frames.values()), freq=tf.replace("m", "min").replace("d", "D"))
+        d = d.iloc[:-1]
+        if src != tf:
+            d = d.resample(_freq(tf), label="left", closed="left").agg(agg).dropna()
+        frames[c] = d
+    start = max(start, min(f.index[0] for f in frames.values()))
+    grid = pd.date_range(start.ceil(_freq(tf)), max(f.index[-1] for f in frames.values()), freq=_freq(tf))
     panel = {k: pd.DataFrame({c: f[k].reindex(grid) for c, f in frames.items()}) for k in ("open", "high", "low", "close", "volume")}
     panel["ret"] = panel["close"].pct_change(fill_method=None)
     return panel

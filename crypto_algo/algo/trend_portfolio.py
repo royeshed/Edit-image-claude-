@@ -1,13 +1,17 @@
-"""Multi-coin trend portfolio: the strategy selected by the research in research/.
+"""Multi-coin, long-only spot portfolios selected by the research in research/.
 
-Once a day, at the close of the `decide_hour` UTC candle, every coin gets a weight:
+Two strategies, both rebalanced with market orders to per-coin weights
+(weight = size / number_of_coins, i.e. a fraction of total equity):
 
-    signal = mean of sign(return over L) for L in base * (1/4, 1/2, 1, 2, 4), floored at 0 (long only)
+"momentum" (1h candles, once a day at the close of the `decide_hour` UTC candle)
+    signal = mean of sign(return over L) for L in base * (1/4, 1/2, 1, 2, 4), floored at 0
     size   = signal * target_vol / realised_vol(30 days), capped at `cap`
-    weight = size / number_of_coins           (fraction of total equity)
 
-and the account is rebalanced to those weights with market orders. There are no
-stops: risk is controlled by volatility scaling and by going to cash when trends end.
+"breakout" (4h candles, at every candle close)
+    size   = share of the Donchian systems (entry N-bar high, exit M-bar low) that are long,
+             for N in `entries` x M in `exits` -> 0, 1/6, ..., 1
+
+There are no stops: risk is controlled by sizing and by going to cash when trends end.
 """
 import json
 import logging
@@ -28,6 +32,7 @@ HOURS_PER_YEAR = 8760
 
 @dataclass
 class PortfolioConfig:
+    strategy: str = "momentum"     # "momentum" or "breakout"
     symbols: list[str] = field(default_factory=lambda: ["BTC/USDT", "ETH/USDT", "BNB/USDT", "XRP/USDT", "ADA/USDT",
                                                          "DOGE/USDT", "SOL/USDT", "AVAX/USDT"])
     base_hours: int = 480          # 20 days; the ensemble uses 5, 10, 20, 40 and 80 days
@@ -36,15 +41,39 @@ class PortfolioConfig:
     cap: float = 1.0               # max sleeve size (1.0 = no leverage, spot-compatible)
     vol_hours: int = 720           # realised-volatility window (30 days)
     min_trade_usd: float = 10.0    # skip rebalancing trades smaller than this
+    entries: tuple = (50, 100, 200)  # breakout: entry channel lengths (4h bars)
+    exits: tuple = (10, 20)          # breakout: exit channel lengths (4h bars)
     state_file: str = "portfolio_state.json"
 
     @property
+    def timeframe(self) -> str:
+        return "4h" if self.strategy == "breakout" else "1h"
+
+    @property
     def history_hours(self) -> int:
+        if self.strategy == "breakout":
+            return (max(self.entries) * 4 + 50) * 4  # enough 4h bars for the channel state to settle
         return self.base_hours * 4 + 24
 
 
 def ensemble_signal(close: pd.DataFrame, base: int, mults=(0.25, 0.5, 1, 2, 4)) -> pd.DataFrame:
     return sum(np.sign(close / close.shift(int(base * m)) - 1) for m in mults) / len(mults)
+
+
+def breakout_state(close: pd.DataFrame, high: pd.DataFrame, low: pd.DataFrame, n: int, m: int) -> pd.DataFrame:
+    """1 from a close above the prior n-bar high until a close below the prior m-bar low."""
+    entry = close > high.rolling(n).max().shift()
+    exit_ = close < low.rolling(m).min().shift()
+    s = pd.DataFrame(np.where(exit_, 0.0, np.where(entry, 1.0, np.nan)), index=close.index, columns=close.columns)
+    return s.ffill().fillna(0.0)
+
+
+def breakout_weights(bars: dict[str, pd.DataFrame], cfg: PortfolioConfig) -> pd.Series:
+    """Weights from 4h close/high/low panels whose last row is the just-closed candle."""
+    c, h, l = bars["close"], bars["high"], bars["low"]
+    size = sum(breakout_state(c, h, l, n, m) for n in cfg.entries for m in cfg.exits) / (len(cfg.entries) * len(cfg.exits))
+    live = c.iloc[-1].notna()
+    return (size.iloc[-1] / live.sum()).where(live, 0.0)
 
 
 def target_weights(closes: pd.DataFrame, cfg: PortfolioConfig) -> pd.Series:
@@ -123,12 +152,12 @@ class PortfolioTrader:
             s["paper_cash"], s["paper_holdings"] = self.broker.cash, self.broker.holdings
         self.state_path.write_text(json.dumps(s, indent=2))
 
-    def closes(self) -> pd.DataFrame:
-        """Hourly closes of closed candles for all symbols."""
-        since = pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=self.cfg.history_hours + 2)
-        cols = {s: fetch_ohlcv(self.ex, s, "1h", since)["close"] for s in self.cfg.symbols}
-        df = pd.DataFrame(cols)
-        return df.iloc[:-1]  # last candle is still forming
+    def bars(self) -> dict[str, pd.DataFrame]:
+        """close/high/low panels of closed candles for all symbols."""
+        since = pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=self.cfg.history_hours + 8)
+        frames = {s: fetch_ohlcv(self.ex, s, self.cfg.timeframe, since) for s in self.cfg.symbols}
+        return {k: pd.DataFrame({s: f[k] for s, f in frames.items()}).iloc[:-1]  # last candle is still forming
+                for k in ("close", "high", "low")}
 
     def rebalance(self, weights: pd.Series, prices: pd.Series) -> None:
         cash, held = self.broker.balances(self.cfg.symbols)
@@ -146,17 +175,25 @@ class PortfolioTrader:
                 log.warning("Skipped %s: %s", s, e)
 
     def step(self) -> bool:
-        closes = self.closes()
+        bars = self.bars()
+        closes = bars["close"]
         last = closes.index[-1]
-        if last.hour != self.cfg.decide_hour or str(last) == self.last_decision:
+        if str(last) == self.last_decision:
             return False
-        self.rebalance(target_weights(closes, self.cfg), closes.iloc[-1])
+        if self.cfg.strategy == "breakout":
+            weights = breakout_weights(bars, self.cfg)
+        else:
+            if last.hour != self.cfg.decide_hour:
+                return False
+            weights = target_weights(closes, self.cfg)
+        self.rebalance(weights, closes.iloc[-1])
         self.last_decision = str(last)
         self._save()
         return True
 
     def run(self, poll_seconds: int = 300) -> None:
-        log.info("Trend portfolio on %d coins, deciding daily at %02d:00 UTC candle close", len(self.cfg.symbols), self.cfg.decide_hour)
+        when = "every 4h candle close" if self.cfg.strategy == "breakout" else f"daily at the {self.cfg.decide_hour:02d}:00 UTC candle close"
+        log.info("%s portfolio on %d coins, rebalancing %s", self.cfg.strategy, len(self.cfg.symbols), when)
         while True:
             try:
                 self.step()

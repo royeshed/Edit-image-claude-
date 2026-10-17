@@ -38,8 +38,8 @@ def test_trader_rebalances_once_per_day_at_decision_hour(tmp_path):
     cfg = PortfolioConfig(symbols=list(closes.columns), state_file=str(tmp_path / "s.json"))
 
     class Replay(PortfolioTrader):
-        def closes(self):
-            return self._closes
+        def bars(self):
+            return {"close": self._closes, "high": self._closes, "low": self._closes}
 
     t = Replay(cfg, None, PaperPortfolioBroker(10_000, 0.0005, 0.0002))
     decisions = 0
@@ -55,3 +55,14 @@ def test_trader_rebalances_once_per_day_at_decision_hour(tmp_path):
     # State survives a restart.
     t2 = Replay(cfg, None, PaperPortfolioBroker(0, 0.0005, 0.0002))
     assert t2.broker.balances(cfg.symbols) == (cash, held)
+
+
+def test_breakout_weights_follow_channels():
+    from algo.trend_portfolio import breakout_weights
+
+    closes = panel(n=1500)
+    cfg = PortfolioConfig(strategy="breakout", symbols=list(closes.columns))
+    w = breakout_weights({"close": closes, "high": closes, "low": closes}, cfg)
+    assert (w >= 0).all() and (w <= 1 / len(w) + 1e-12).all()
+    assert w["C0/USDT"] == pytest.approx(1 / 3)   # strong uptrend: all 6 systems long
+    assert w["C1/USDT"] == 0                       # downtrend: flat
