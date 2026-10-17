@@ -46,7 +46,9 @@ def load_panel(tf: str = "1h", coins=COINS, start: pd.Timestamp = START) -> dict
     start = max(start, min(f.index[0] for f in frames.values()))
     grid = pd.date_range(start.ceil(_freq(tf)), max(f.index[-1] for f in frames.values()), freq=_freq(tf))
     panel = {k: pd.DataFrame({c: f[k].reindex(grid) for c, f in frames.items()}) for k in ("open", "high", "low", "close", "volume")}
-    panel["ret"] = panel["close"].pct_change(fill_method=None)
+    # Returns run from the last traded close, so a move across an exchange-maintenance gap is kept;
+    # before a coin lists, its return stays NaN.
+    panel["ret"] = panel["close"].ffill().pct_change(fill_method=None).where(panel["close"].ffill().notna())
     return panel
 
 
