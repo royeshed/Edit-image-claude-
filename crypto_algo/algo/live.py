@@ -2,8 +2,9 @@
 
 Every `poll_seconds` it checks the latest price against the stop and take-profit.
 When a new candle closes it recomputes the strategy on closed candles only and acts
-on the signal. State is persisted so the bot can be restarted without losing track
-of an open position.
+on the signal. In live mode the stop also rests on the exchange, so the position is
+protected while the bot is down. State is persisted so the bot can be restarted
+without losing track of an open position.
 """
 import json
 import logging
@@ -14,6 +15,7 @@ from pathlib import Path
 import pandas as pd
 
 from .config import Config
+from .broker import OrderRejected
 from .data import to_frame
 from .risk import Position, position_size, trail_stop
 from .strategy import make_strategy
@@ -32,6 +34,7 @@ class Trader:
         self.last_candle: str | None = None
         self.day: str | None = None
         self.day_start_equity: float | None = None
+        self.pending_entry: dict | None = None  # entry signal not yet filled (retried within its candle)
         self._load_state()
 
     # ---- state -------------------------------------------------------------
@@ -43,6 +46,7 @@ class Trader:
         self.last_candle = s.get("last_candle")
         self.day = s.get("day")
         self.day_start_equity = s.get("day_start_equity")
+        self.pending_entry = s.get("pending_entry")
         if hasattr(self.broker, "cash") and "paper_cash" in s:
             self.broker.cash, self.broker.base_qty = s["paper_cash"], s["paper_base"]
         log.info("Restored state: position=%s", self.position)
@@ -53,6 +57,7 @@ class Trader:
             "last_candle": self.last_candle,
             "day": self.day,
             "day_start_equity": self.day_start_equity,
+            "pending_entry": self.pending_entry,
         }
         if hasattr(self.broker, "cash"):
             s["paper_cash"], s["paper_base"] = self.broker.cash, self.broker.base_qty
@@ -69,22 +74,75 @@ class Trader:
         return cash + base * price
 
     def _halted(self, price: float) -> bool:
-        today = pd.Timestamp.now(tz="UTC").date().isoformat()
+        # Day of the latest closed candle (equals the wall-clock day live, and keeps replays correct).
+        now = pd.Timestamp(self.last_candle) if self.last_candle else pd.Timestamp.now(tz="UTC")
+        today = now.date().isoformat()
         equity = self._equity(price)
         if today != self.day:
             self.day, self.day_start_equity = today, equity
         return equity <= self.day_start_equity * (1 - self.cfg.risk.max_daily_loss)
 
     def _exit(self, price: float, reason: str) -> None:
-        qty, fill = self.broker.market_sell(self.position.qty, price)
+        if self.position.stop_order_id:
+            self.broker.cancel_order(self.position.stop_order_id)
+            self.position.stop_order_id = None
+        _, base = self.broker.balance()
+        try:
+            qty, fill = self.broker.market_sell(min(self.position.qty, base), price)
+        except OrderRejected as e:  # nothing (or only dust) left, e.g. the exchange stop already sold it
+            log.warning("EXIT (%s): nothing to sell (%s); clearing position", reason, e)
+            self.position = None
+            return
         pnl = qty * (fill - self.position.entry_price)
         log.info("EXIT (%s) qty=%.6f fill=%.2f pnl≈%.2f", reason, qty, fill, pnl)
         self.position = None
+
+    def _sync_exchange_stop(self) -> None:
+        """Detect a stop that filled on the exchange (e.g. while the bot was down)."""
+        if self.position and self.position.stop_order_id and self.broker.order_filled(self.position.stop_order_id):
+            log.warning("Exchange stop %s filled; position closed", self.position.stop_order_id)
+            self.position = None
+
+    def _move_exchange_stop(self) -> None:
+        self._sync_exchange_stop()  # don't replace a stop that has just filled
+        if not self.position:
+            return
+        if self.position.stop_order_id:
+            self.broker.cancel_order(self.position.stop_order_id)
+        self.position.stop_order_id = self.broker.place_stop(self.position.qty, self.position.stop)
+
+    def _try_entry(self, price: float) -> None:
+        if self._halted(price):
+            log.warning("Daily loss limit reached; skipping entry")
+            self.pending_entry = None
+            return
+        cash, _ = self.broker.balance()
+        qty, stop, tp = position_size(cash, price, self.pending_entry["atr"], self.cfg.risk)
+        try:
+            if qty <= 0:
+                raise OrderRejected("position size is zero")
+            filled, fill = self.broker.market_buy(qty, price)
+        except OrderRejected as e:
+            log.warning("Entry skipped: %s", e)
+            self.pending_entry = None
+            return
+        except Exception:
+            log.exception("Entry order failed; will retry next poll")
+            return
+        self.pending_entry = None
+        if filled > 0:
+            # Some exchanges take the fee out of the coin bought; track what we actually hold.
+            _, base = self.broker.balance()
+            held = min(filled, base) if base > 0 else filled
+            self.position = Position(held, fill, stop, tp, self.last_candle, highest=fill)
+            self.position.stop_order_id = self.broker.place_stop(held, stop)
+            log.info("ENTRY qty=%.6f fill=%.2f stop=%.2f tp=%.2f", held, fill, stop, tp)
 
     # ---- main loop ---------------------------------------------------------
     def step(self) -> None:
         price = float(self.ex.fetch_ticker(self.cfg.symbol)["last"])
 
+        self._sync_exchange_stop()
         if self.position:
             if price <= self.position.stop:
                 self._exit(price, "stop")
@@ -98,21 +156,19 @@ class Trader:
             sig = self.strategy.compute(df).iloc[-1]
             log.info("Candle %s close=%.2f rsi=%.1f entry=%s exit=%s",
                      candle, sig["close"], sig["rsi"], sig["entry"], sig["exit"])
+            self.pending_entry = None  # a signal is only valid for the candle that produced it
             if self.position:
+                old_stop = self.position.stop
                 trail_stop(self.position, sig["high"], sig["atr"], self.cfg.risk)
                 if sig["exit"]:
                     self._exit(price, "signal")
+                elif self.position.stop > old_stop:
+                    self._move_exchange_stop()
             elif sig["entry"]:
-                if self._halted(price):
-                    log.warning("Daily loss limit reached; skipping entry")
-                else:
-                    cash, _ = self.broker.balance()
-                    qty, stop, tp = position_size(cash, price, sig["atr"], self.cfg.risk)
-                    if qty > 0:
-                        filled, fill = self.broker.market_buy(qty, price)
-                        if filled > 0:
-                            self.position = Position(filled, fill, stop, tp, candle, highest=fill)
-                            log.info("ENTRY qty=%.6f fill=%.2f stop=%.2f tp=%.2f", filled, fill, stop, tp)
+                self.pending_entry = {"candle": candle, "atr": float(sig["atr"])}
+
+        if self.pending_entry and self.position is None:
+            self._try_entry(price)
 
         self._halted(price)  # roll the day even when idle
         self._save_state()

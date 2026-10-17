@@ -12,6 +12,7 @@ class Position:
     take_profit: float
     entry_time: object = None
     highest: float = 0.0
+    stop_order_id: str | None = None   # protective stop resting on the exchange (live only)
 
 
 def position_size(equity: float, price: float, atr_value: float, cfg: RiskConfig) -> tuple[float, float, float]:

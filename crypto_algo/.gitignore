@@ -4,3 +4,4 @@ data/
 *state.json
 .env
 *.log
+run/

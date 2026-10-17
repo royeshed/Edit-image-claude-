@@ -1,0 +1,16 @@
+# Paper trading:   docker compose up -d paper
+# Live trading:    put keys in .env, then  docker compose --profile live up -d live
+services:
+  paper:
+    build: .
+    command: ["paper"]
+    restart: always
+    volumes: ["./run:/app/run"]
+
+  live:
+    build: .
+    command: ["live", "--i-understand-the-risk"]
+    restart: always
+    env_file: .env
+    volumes: ["./run:/app/run"]
+    profiles: ["live"]

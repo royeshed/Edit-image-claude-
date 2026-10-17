@@ -124,3 +124,14 @@ def test_paper_trader_end_to_end(df, tmp_path):
     # Restart from saved state keeps the same balances.
     restored = Trader(cfg, ex, PaperBroker(0, cfg.costs.fee_rate, cfg.costs.slippage))
     assert restored.broker.balance() == broker.balance()
+
+
+def test_replay_matches_backtest_roughly():
+    from algo.replay import replay
+
+    df = synthetic_ohlcv(bars=1500, seed=3)
+    cfg = Config()
+    cfg.strategy.name = "donchian"
+    eq = replay(df, cfg)
+    bt = run_backtest(df, cfg).equity.loc[eq.index]
+    assert abs(eq.iloc[-1] / bt.iloc[-1] - 1) < 0.05

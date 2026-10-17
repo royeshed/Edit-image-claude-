@@ -3,6 +3,8 @@
   python main.py backtest --days 365            # download history and backtest
   python main.py backtest --synthetic           # offline test on generated data
   python main.py optimize --days 730            # grid search on train, verify on test
+  python main.py scan --days 2000               # many coins x timeframes in one table
+  python main.py replay --csv data/x.csv        # run the live loop over history (paper)
   python main.py paper                          # live market data, simulated orders
   python main.py live --i-understand-the-risk   # REAL orders (needs API keys in env)
 """
@@ -39,6 +41,44 @@ def cmd_backtest(args, cfg: Config) -> None:
     if args.plot:
         res.equity.to_csv(args.plot)
         print(f"\nEquity curve written to {args.plot}")
+
+
+SCAN_SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT", "DOGE/USDT", "ADA/USDT", "AVAX/USDT"]
+SCAN_TIMEFRAMES = ["1h", "4h", "1d"]
+
+
+def cmd_scan(args, cfg: Config) -> None:
+    """Backtest the configured strategy, unchanged, on every symbol x timeframe."""
+    symbols = args.symbols.split(",") if args.symbols else SCAN_SYMBOLS
+    timeframes = args.timeframes.split(",") if args.timeframes else SCAN_TIMEFRAMES
+    print(f"{'symbol':<11}{'tf':<4}{'from':<12}{'final':>9}{'return':>9}{'B&H':>9}{'maxDD':>8}{'B&H DD':>8}"
+          f"{'trades':>7}{'win':>5}{'PF':>6}{'hold':>7}")
+    for symbol in symbols:
+        for tf in timeframes:
+            c = replace(cfg, symbol=symbol, timeframe=tf)
+            try:
+                df = load_history(c.exchange, symbol, tf, args.days)
+            except Exception as e:
+                print(f"{symbol:<11}{tf:<4}error: {e}")
+                continue
+            s = run_backtest(df, c).stats
+            bh_dd = (df["close"] / df["close"].cummax() - 1).min()
+            h = s["avg_hold_hours"]
+            print(f"{symbol:<11}{tf:<4}{df.index[0]:%Y-%m-%d}  {s['final_equity']:>9,.0f}{s['total_return']:>9.1%}"
+                  f"{s['buy_and_hold']:>9.0%}{s['max_drawdown']:>8.1%}{bh_dd:>8.0%}{s['trades']:>7}{s['win_rate']:>5.0%}"
+                  f"{s['profit_factor']:>6.2f}{(f'{h:.0f}h' if h < 48 else f'{h / 24:.1f}d'):>7}")
+
+
+def cmd_replay(args, cfg: Config) -> None:
+    from algo.replay import replay
+
+    df = get_data(args, cfg)
+    logging.getLogger("algo").setLevel(logging.WARNING)
+    eq = replay(df, cfg)
+    bt = run_backtest(df, cfg).equity.loc[eq.index]
+    print(f"live loop (paper): {eq.iloc[-1]:>10,.0f}  {eq.iloc[-1] / eq.iloc[0] - 1:+.1%}")
+    print(f"backtest:          {bt.iloc[-1]:>10,.0f}  {bt.iloc[-1] / bt.iloc[0] - 1:+.1%}")
+    print("Small differences are expected: the live loop sees one price per poll, the backtest uses intrabar highs/lows.")
 
 
 def cmd_optimize(args, cfg: Config) -> None:
@@ -89,11 +129,13 @@ def cmd_trade(args, cfg: Config, live: bool) -> None:
 
 def main() -> None:
     p = argparse.ArgumentParser(description="Crypto algo trading bot")
-    p.add_argument("command", choices=["backtest", "optimize", "paper", "live"])
+    p.add_argument("command", choices=["backtest", "optimize", "scan", "replay", "paper", "live"])
     p.add_argument("--config", default="config.json")
     p.add_argument("--symbol", help="override config symbol, e.g. ETH/USDT")
     p.add_argument("--timeframe", help="override config timeframe, e.g. 4h")
     p.add_argument("--days", type=int, default=365)
+    p.add_argument("--symbols", help="scan: comma-separated symbols")
+    p.add_argument("--timeframes", help="scan: comma-separated timeframes")
     p.add_argument("--csv", help="backtest on a local OHLCV CSV instead of downloading")
     p.add_argument("--synthetic", action="store_true", help="use generated data (offline)")
     p.add_argument("--trades", action="store_true", help="print every trade")
@@ -114,6 +156,10 @@ def main() -> None:
         cmd_backtest(args, cfg)
     elif args.command == "optimize":
         cmd_optimize(args, cfg)
+    elif args.command == "scan":
+        cmd_scan(args, cfg)
+    elif args.command == "replay":
+        cmd_replay(args, cfg)
     else:
         cmd_trade(args, cfg, live=args.command == "live")
 
