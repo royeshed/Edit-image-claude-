@@ -8,6 +8,7 @@
   python main.py paper                          # live market data, simulated orders
   python main.py portfolio-paper                # RESEARCH WINNER: multi-coin trend portfolio, simulated
   python main.py portfolio-live --i-understand-the-risk   # same, real spot orders
+  python main.py portfolio-forward              # paper ledger since the frozen start date (config "paper")
   python main.py live --i-understand-the-risk   # REAL orders (needs API keys in env)
 """
 import argparse
@@ -16,6 +17,7 @@ import logging
 import os
 import sys
 from dataclasses import replace
+from pathlib import Path
 
 from algo.backtest import format_stats, run_backtest
 from algo.config import Config
@@ -132,6 +134,38 @@ def cmd_portfolio(args, cfg: Config, live: bool) -> None:
     PortfolioTrader(pcfg, exchange, broker).run()
 
 
+def cmd_forward(args, cfg: Config) -> None:
+    """Replay the live bot's code since the frozen paper start date and print the ledger of every profile."""
+    import json
+
+    import pandas as pd
+
+    from algo import forward
+    from algo.trend_portfolio import PortfolioConfig
+
+    raw = json.loads(open(args.config).read())
+    paper = raw.get("paper", {})
+    start = pd.Timestamp(args.start or paper["start"], tz="UTC")
+    capital = paper.get("capital", cfg.initial_capital)
+    logging.getLogger("algo").setLevel(logging.WARNING)
+    exchange = make_exchange(cfg.exchange)
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    report = {}
+    for name, overrides in paper.get("profiles", {"standard": {}}).items():
+        pcfg = PortfolioConfig(**{**raw["portfolio"], **overrides})
+        r = forward.run(pcfg, exchange, start, capital=capital, fee_rate=cfg.costs.fee_rate, slippage=cfg.costs.slippage)
+        s = forward.summary(r, capital)
+        report[name] = s
+        r["equity"].to_csv(out / f"{name}_equity.csv")
+        r["fills"].to_csv(out / f"{name}_fills.csv", index=False)
+        print(f"\n== {name} ({overrides or 'config.json'})")
+        for k, v in s.items():
+            print(f"  {k:16s} {v:+.2%}" if isinstance(v, float) and k in ("return", "annualised", "max_drawdown", "btc_hold_return")
+                  else f"  {k:16s} {v}")
+    (out / "summary.json").write_text(json.dumps(report, indent=2, default=str))
+
+
 def cmd_trade(args, cfg: Config, live: bool) -> None:
     from algo.broker import LiveBroker, PaperBroker
     from algo.live import Trader
@@ -153,7 +187,8 @@ def cmd_trade(args, cfg: Config, live: bool) -> None:
 
 def main() -> None:
     p = argparse.ArgumentParser(description="Crypto algo trading bot")
-    p.add_argument("command", choices=["backtest", "optimize", "scan", "replay", "paper", "live", "portfolio-paper", "portfolio-live"])
+    p.add_argument("command", choices=["backtest", "optimize", "scan", "replay", "paper", "live", "portfolio-paper", "portfolio-live",
+                                       "portfolio-forward"])
     p.add_argument("--config", default="config.json")
     p.add_argument("--symbol", help="override config symbol, e.g. ETH/USDT")
     p.add_argument("--timeframe", help="override config timeframe, e.g. 4h")
@@ -164,6 +199,8 @@ def main() -> None:
     p.add_argument("--synthetic", action="store_true", help="use generated data (offline)")
     p.add_argument("--trades", action="store_true", help="print every trade")
     p.add_argument("--plot", metavar="FILE", help="write the equity curve to CSV")
+    p.add_argument("--start", help="portfolio-forward: replay from this date instead of the frozen paper start")
+    p.add_argument("--out", default="paper", help="portfolio-forward: where to write the ledgers")
     p.add_argument("--i-understand-the-risk", action="store_true")
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args()
@@ -184,6 +221,8 @@ def main() -> None:
         cmd_scan(args, cfg)
     elif args.command == "replay":
         cmd_replay(args, cfg)
+    elif args.command == "portfolio-forward":
+        cmd_forward(args, cfg)
     elif args.command.startswith("portfolio"):
         cmd_portfolio(args, cfg, live=args.command == "portfolio-live")
     else:

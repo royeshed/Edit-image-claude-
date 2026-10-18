@@ -62,7 +62,7 @@ class Config:
     def load(cls, path: str | Path) -> "Config":
         raw = json.loads(Path(path).read_text())
         return cls(
-            **{k: v for k, v in raw.items() if k not in ("strategy", "risk", "costs", "portfolio")},
+            **{k: v for k, v in raw.items() if k not in ("strategy", "risk", "costs", "portfolio", "paper")},
             strategy=StrategyConfig(**raw.get("strategy", {})),
             risk=RiskConfig(**raw.get("risk", {})),
             costs=CostConfig(**raw.get("costs", {})),

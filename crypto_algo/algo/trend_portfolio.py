@@ -18,6 +18,10 @@ Two strategies, both rebalanced with market orders to per-coin weights
     `max_slots` is the risk dial (each coin gets at most 1/max_slots of equity). With top_k = 0 and
     max_slots = 0 every coin keeps a fixed 1/N sleeve.
 
+Universe: `universe` = "fixed" trades `symbols`; "mature_volume" re-chooses `universe_size` coins on every
+refresh date of `universe_calendar` (algo/universe.py). Coins that leave the universe are sold; coins that
+join are bought only when their own signal is on.
+
 There are no stops: risk is controlled by sizing and by going to cash when trends end.
 """
 import json
@@ -29,6 +33,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from . import universe as uni
 from .broker import OrderRejected
 from .data import fetch_ohlcv
 from .htf import confirmation, confirmed_breakouts
@@ -57,6 +62,10 @@ class PortfolioConfig:
     top_k: int = 0                   # breakout: hold only the k strongest coins in a trend (0 = all)
     rank_days: int = 14              # breakout: momentum window used to rank coins for top_k
     max_slots: float = 0             # breakout: risk dial, max weight per coin = 1/max_slots (0 = number of coins)
+    universe: str = "fixed"          # "fixed" (trade `symbols`) or "mature_volume" (re-chosen each refresh, algo/universe.py)
+    universe_size: int = 15
+    universe_min_age: int = 365      # days of uninterrupted daily history a coin needs to be chosen
+    universe_calendar: str = "Q-jan"  # refresh on the 1st of Jan/Apr/Jul/Oct, 00:00 UTC
     state_file: str = "portfolio_state.json"
 
     @property
@@ -67,6 +76,8 @@ class PortfolioConfig:
     def history_hours(self) -> int:
         if self.strategy == "breakout":
             hours = (max(self.entries) * 4 + 50) * 4  # enough 4h bars for the channel state to settle
+            if "1d" in self.confirm_tfs:
+                hours = max(hours, 24 * 365)          # a daily EMA50 forgets its starting value after ~a year
             if "1w" in self.confirm_tfs:
                 hours = max(hours, 24 * 7 * 60)       # ~60 weekly candles for weekly swing structure
             return hours
@@ -107,6 +118,7 @@ class PaperPortfolioBroker:
     def __init__(self, cash: float, fee_rate: float, slippage: float):
         self.cash, self.fee_rate, self.slippage = cash, fee_rate, slippage
         self.holdings: dict[str, float] = {}
+        self.fills: list[dict] = []   # every simulated fill, for reports
 
     def balances(self, symbols) -> tuple[float, dict[str, float]]:
         return self.cash, {s: self.holdings.get(s, 0.0) for s in symbols}
@@ -116,6 +128,7 @@ class PaperPortfolioBroker:
         qty = min(qty, self.cash / (fill * (1 + self.fee_rate)))
         self.cash -= qty * fill * (1 + self.fee_rate)
         self.holdings[symbol] = self.holdings.get(symbol, 0.0) + qty
+        self.fills.append({"symbol": symbol, "side": "buy", "qty": qty, "price": fill, "fee": qty * fill * self.fee_rate})
         log.info("PAPER BUY  %-10s %.6f @ %.4f", symbol, qty, fill)
 
     def market_sell(self, symbol: str, qty: float, price: float) -> None:
@@ -123,6 +136,9 @@ class PaperPortfolioBroker:
         qty = min(qty, self.holdings.get(symbol, 0.0))
         self.cash += qty * fill * (1 - self.fee_rate)
         self.holdings[symbol] = self.holdings.get(symbol, 0.0) - qty
+        if self.holdings[symbol] <= 1e-12:
+            del self.holdings[symbol]
+        self.fills.append({"symbol": symbol, "side": "sell", "qty": qty, "price": fill, "fee": qty * fill * self.fee_rate})
         log.info("PAPER SELL %-10s %.6f @ %.4f", symbol, qty, fill)
 
 
@@ -154,33 +170,64 @@ class LivePortfolioBroker:
 
 
 class PortfolioTrader:
+    tradable_only = True  # universe choice: only pairs trading now (a replay of the past also sees delisted ones)
+
     def __init__(self, cfg: PortfolioConfig, exchange, broker):
         self.cfg, self.ex, self.broker = cfg, exchange, broker
         self.state_path = Path(cfg.state_file)
         self.last_decision: str | None = None
+        self.universe_date: str | None = None
+        self.universe: list[str] = list(cfg.symbols)
+        self.positions: list[str] = []  # symbols the bot holds, so coins that left the universe are still sold
         if self.state_path.exists():
             s = json.loads(self.state_path.read_text())
             self.last_decision = s.get("last_decision")
+            self.universe_date = s.get("universe_date")
+            self.universe = s.get("universe", self.universe)
+            self.positions = s.get("positions", [])
             if isinstance(broker, PaperPortfolioBroker) and "paper_cash" in s:
                 broker.cash, broker.holdings = s["paper_cash"], s["paper_holdings"]
 
     def _save(self) -> None:
-        s = {"last_decision": self.last_decision}
+        s = {"last_decision": self.last_decision, "universe_date": self.universe_date, "universe": self.universe,
+             "positions": self.positions}
         if isinstance(self.broker, PaperPortfolioBroker):
             s["paper_cash"], s["paper_holdings"] = self.broker.cash, self.broker.holdings
         self.state_path.write_text(json.dumps(s, indent=2))
 
-    def bars(self) -> dict[str, pd.DataFrame]:
-        """close/high/low panels of closed candles for all symbols."""
-        since = pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=self.cfg.history_hours + 8)
-        frames = {s: fetch_ohlcv(self.ex, s, self.cfg.timeframe, since) for s in self.cfg.symbols}
+    def now(self) -> pd.Timestamp:
+        return pd.Timestamp(self.ex.milliseconds(), unit="ms", tz="UTC")
+
+    def symbols_for(self, candle: pd.Timestamp) -> list[str]:
+        """The universe governing the decision on the 4h candle opening at `candle`."""
+        if self.cfg.universe == "fixed":
+            return list(self.cfg.symbols)
+        R = uni.refresh_date(candle, self.cfg.universe_calendar)
+        if self.universe_date != str(R):
+            self.universe = uni.choose(self.ex, R, self.cfg.universe_size, self.cfg.universe_min_age, self.tradable_only)
+            self.universe_date = str(R)
+            log.info("Universe for %s: %s", R.date(), " ".join(self.universe))
+            self._save()
+        return self.universe
+
+    def bars(self, symbols: list[str] | None = None) -> dict[str, pd.DataFrame]:
+        """close/high/low panels of closed candles for `symbols` (default: the configured ones)."""
+        symbols = list(self.cfg.symbols) if symbols is None else symbols
+        since = self.now() - pd.Timedelta(hours=self.cfg.history_hours + 8)
+        frames = {}
+        for s in symbols:
+            try:
+                frames[s] = fetch_ohlcv(self.ex, s, self.cfg.timeframe, since)
+            except Exception as e:  # a halted pair: no new signal, and held coins are priced from the last close
+                log.warning("No %s candles for %s: %s", self.cfg.timeframe, s, e)
         return {k: pd.DataFrame({s: f[k] for s, f in frames.items()}).iloc[:-1]  # last candle is still forming
                 for k in ("close", "high", "low")}
 
     def rebalance(self, weights: pd.Series, prices: pd.Series) -> None:
-        cash, held = self.broker.balances(self.cfg.symbols)
-        equity = cash + sum(held[s] * prices[s] for s in self.cfg.symbols)
-        delta = {s: weights[s] * equity / prices[s] - held[s] for s in self.cfg.symbols}
+        symbols = [s for s in weights.index if pd.notna(prices.get(s))]
+        cash, held = self.broker.balances(symbols)
+        equity = cash + sum(held[s] * prices[s] for s in symbols)
+        delta = {s: weights[s] * equity / prices[s] - held[s] for s in symbols}
         log.info("Rebalance: equity %.2f, targets %s", equity, {s: f"{w:.1%}" for s, w in weights.items() if w > 0})
         # Sells first so their proceeds fund the buys.
         for s in sorted(delta, key=lambda k: delta[k]):
@@ -193,6 +240,8 @@ class PortfolioTrader:
                 log.warning("Skipped %s: %s", s, e)
 
     def step(self) -> bool:
+        if self.cfg.universe != "fixed":
+            return self._step_universe()
         bars = self.bars()
         closes = bars["close"]
         last = closes.index[-1]
@@ -206,6 +255,28 @@ class PortfolioTrader:
             weights = target_weights(closes, self.cfg)
         self.rebalance(weights, closes.iloc[-1])
         self.last_decision = str(last)
+        self._save()
+        return True
+
+    def _step_universe(self) -> bool:
+        """Breakout portfolio on a universe that changes on refresh dates."""
+        step = pd.Timedelta(self.cfg.timeframe)
+        candle = self.now().floor(step) - step            # the candle that has just closed
+        if str(candle) == self.last_decision:
+            return False
+        universe = self.symbols_for(candle)
+        bars = self.bars(list(dict.fromkeys(universe + self.positions)))
+        closes = bars["close"]
+        if closes.empty or closes.index[-1] != candle:  # data not there yet: try again on the next poll
+            return False
+        live = [s for s in universe if s in closes.columns]
+        weights = breakout_weights({k: v[live] for k, v in bars.items()}, self.cfg).reindex(closes.columns).fillna(0.0)
+        prices = closes.ffill().iloc[-1]
+        self.rebalance(weights, prices)
+        _, held = self.broker.balances(list(closes.columns))
+        unpriced = [s for s in self.positions if s not in closes.columns]   # keep tracking coins we could not price
+        self.positions = unpriced + [s for s in closes.columns if held.get(s, 0) * prices[s] >= self.cfg.min_trade_usd]
+        self.last_decision = str(candle)
         self._save()
         return True
 

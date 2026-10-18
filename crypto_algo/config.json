@@ -77,6 +77,20 @@
     "confirm_mode": "gate",
     "top_k": 3,
     "rank_days": 14,
-    "max_slots": 6
+    "max_slots": 6,
+    "universe": "mature_volume",
+    "universe_size": 15,
+    "universe_min_age": 365,
+    "universe_calendar": "Q-jan"
+  },
+  "paper": {
+    "start": "2026-10-18 20:00",
+    "capital": 10000,
+    "profiles": {
+      "standard": {},
+      "aggressive": {
+        "top_k": 6
+      }
+    }
   }
 }
