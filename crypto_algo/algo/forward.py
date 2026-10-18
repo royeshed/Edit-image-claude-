@@ -22,7 +22,7 @@ from .data import fetch_ohlcv
 from .trend_portfolio import PaperPortfolioBroker, PortfolioConfig, PortfolioTrader
 
 log = logging.getLogger(__name__)
-MS = {"4h": 14_400_000, "1d": 86_400_000}
+MS = {"1h": 3_600_000, "4h": 14_400_000, "1d": 86_400_000}
 
 
 class HistoricalExchange:
@@ -96,6 +96,12 @@ class HistoricalExchange:
         rows = a[lo:min(hi, lo + limit)].tolist()
         return [[int(r[0]), *r[1:]] for r in rows]
 
+    def traded_at(self, symbol: str, R: pd.Timestamp) -> bool:
+        """Was the pair trading just before R (a 4h candle in the 12 hours before R)? Stands in for the exchange
+        status the live bot reads at R."""
+        d = self._full(symbol, "4h")
+        return bool(((d.index >= R - pd.Timedelta("12h")) & (d.index < R)).any())
+
     def publicGetKlines(self, params: dict) -> list:
         end = params["endTime"]
         if end >= self.milliseconds():
@@ -107,15 +113,17 @@ class HistoricalExchange:
 
 
 def run(cfg: PortfolioConfig, exchange, start: pd.Timestamp, end: pd.Timestamp | None = None, capital: float = 10_000,
-        fee_rate: float = 0.001, slippage: float = 0.0005, local_dir=None) -> dict:
-    """Replay the bot from `start` to `end` (default: the last closed 4h candle). Returns the paper ledger."""
+        fee_rate: float = 0.001, slippage: float = 0.0005, local_dir=None, hx: HistoricalExchange | None = None) -> dict:
+    """Replay the bot from `start` to `end` (default: the last closed 4h candle). Returns the paper ledger.
+    Pass the same `hx` to several runs to share downloads (its history_start must cover every config)."""
     step = pd.Timedelta(cfg.timeframe)
     end = end or pd.Timestamp.now(tz="UTC").floor(step)
-    hx = HistoricalExchange(exchange, start - pd.Timedelta(hours=cfg.history_hours + 48), local_dir)
+    hx = hx or HistoricalExchange(exchange, start - pd.Timedelta(hours=cfg.history_hours + 48), local_dir)
     broker = PaperPortfolioBroker(capital, fee_rate, slippage)
     with tempfile.TemporaryDirectory() as tmp:
         trader = PortfolioTrader(replace(cfg, state_file=str(Path(tmp) / "state.json")), hx, broker)
-        trader.tradable_only = False       # a coin delisted later was still tradable back then
+        trader.tradable_only = False       # a coin delisted later was still tradable back then...
+        trader.tradable_at = hx.traded_at  # ...but only if it was trading at the refresh date
         equity, fills, universes = {}, [], {}
         for t in pd.date_range(start.ceil(step), end, freq=step):
             hx.now = t + pd.Timedelta(minutes=1)
@@ -128,11 +136,13 @@ def run(cfg: PortfolioConfig, exchange, start: pd.Timestamp, end: pd.Timestamp |
                 fills.append({"time": t, **f})
             prices = {s: hx._full(s, cfg.timeframe)["close"].loc[:candle].iloc[-1] for s in broker.holdings}
             equity[t] = broker.cash + sum(q * prices[s] for s, q in broker.holdings.items())
-    eq = pd.Series(equity, name="equity")
-    btc = hx._full("BTC/USDT", cfg.timeframe)["close"]
-    btc = btc.reindex(eq.index - step, method="ffill")
+    eq = pd.Series(list(equity.values()), index=pd.DatetimeIndex(list(equity), tz="UTC"), name="equity", dtype=float)
+    btc = pd.Series(dtype=float)
+    if len(eq):
+        b = hx._full("BTC/USDT", cfg.timeframe)["close"].reindex(eq.index - step, method="ffill")
+        btc = pd.Series(b.values / b.values[0] * capital, index=eq.index)
     return {"equity": eq, "fills": pd.DataFrame(fills), "universes": universes, "cash": broker.cash,
-            "holdings": dict(broker.holdings), "btc": pd.Series(btc.values / btc.values[0] * capital, index=eq.index)}
+            "holdings": dict(broker.holdings), "btc": btc}
 
 
 def summary(r: dict, capital: float) -> dict:

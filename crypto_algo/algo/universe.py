@@ -13,10 +13,14 @@ This is the "mature_volume" rule of research/universe_selection.py, chosen on 20
 A universe chosen at R governs decisions on 4h candles that open at or after R; decisions on earlier
 candles keep the previous universe.
 """
+import logging
 import re
+import time
 
 import numpy as np
 import pandas as pd
+
+log = logging.getLogger(__name__)
 
 CALENDARS = {"Q-jan": (1, 4, 7, 10), "Q-feb": (2, 5, 8, 11), "Q-mar": (3, 6, 9, 12), "monthly": tuple(range(1, 13)),
              "Y-jan": (1,)}
@@ -89,11 +93,33 @@ def fetch_daily(exchange, symbol: str, R: pd.Timestamp, days: int = 1000) -> pd.
     return d[d.index + pd.Timedelta("1D") <= R]
 
 
-def choose(exchange, R: pd.Timestamp, size: int = 15, min_age: int = 365, tradable_only: bool = True) -> list[str]:
-    daily = {}
+def choose(exchange, R: pd.Timestamp, size: int = 15, min_age: int = 365, tradable_only: bool = True,
+           retries: int = 3, pause: float = 2.0, tradable_at=None) -> list[str]:
+    """Fetch every candidate's daily candles and select. Raises instead of returning a list built from
+    partial data: a coin skipped because of a network error would change the universe for a whole quarter.
+    `tradable_at(symbol, R)`, when given, decides from data whether a pair was trading at R (a replay of the
+    past cannot ask the exchange for the status it had then)."""
+    import ccxt
+
+    daily, failed = {}, []
     for sym in candidates(exchange, tradable_only=tradable_only):
-        try:
-            daily[sym] = fetch_daily(exchange, sym, R)
-        except Exception:  # a pair the exchange no longer serves cannot be chosen
-            continue
-    return select(daily, R, size, min_age)
+        for attempt in range(retries):
+            try:
+                daily[sym] = fetch_daily(exchange, sym, R)
+                break
+            except ccxt.BadSymbol:            # the exchange does not serve this pair: it cannot be chosen
+                log.info("Universe: %s unknown to the exchange, skipped", sym)
+                break
+            except (ccxt.NetworkError, ccxt.ExchangeNotAvailable) as e:   # timeouts, 5xx, rate limits
+                if attempt == retries - 1:
+                    failed.append(sym)
+                    log.warning("Universe: %s failed %d times: %s", sym, retries, e)
+                else:
+                    time.sleep(pause * 2 ** attempt)
+    if failed:
+        raise RuntimeError(f"universe for {R.date()} not chosen: no daily candles for {len(failed)} pairs ({', '.join(failed[:5])}...)")
+    ranked = select(daily, R, len(daily), min_age)
+    chosen = [s for s in ranked if tradable_at is None or tradable_at(s, R)][:size] if tradable_at else ranked[:size]
+    if not chosen:
+        raise RuntimeError(f"universe for {R.date()} not chosen: no eligible coin among {len(daily)} pairs")
+    return chosen

@@ -138,3 +138,94 @@ def test_live_universe_matches_the_research_rule():
             d[f.name[:-7]] = x[["close", "quote_volume"]]
     for R in [T("2019-07-01"), T("2021-01-01"), T("2022-07-01"), T("2024-10-01"), T("2026-10-01")]:
         assert uni.select(d, R) == [a.split("#")[0] for a in research[R]]
+
+
+class FlakyKlines:
+    """An exchange whose daily-candle requests fail for some symbols."""
+
+    def __init__(self, error_for: dict[str, Exception]):
+        import ccxt  # noqa: F401
+        self.error_for = error_for
+        self.symbols = ["AAA", "BBB", "CCC"]
+
+    def publicGetExchangeInfo(self):
+        return {"symbols": [{"symbol": f"{b}USDT", "baseAsset": b, "quoteAsset": "USDT", "status": "TRADING"} for b in self.symbols]}
+
+    def publicGetKlines(self, params):
+        sym = params["symbol"]
+        if sym in self.error_for:
+            raise self.error_for[sym]
+        d = daily("2023-01-01", "2024-12-31", vol={"AAAUSDT": 3e6, "BBBUSDT": 2e6, "CCCUSDT": 1e6}[sym], seed=len(sym))
+        return [[int(t.timestamp() * 1000), 0, 0, 0, r.close, 0, 0, r.quote_volume] for t, r in d.iterrows()]
+
+
+def test_choose_never_returns_a_universe_built_from_partial_data():
+    import ccxt
+    R = T("2025-01-01")
+    assert uni.choose(FlakyKlines({}), R, size=2, pause=0) == ["AAA/USDT", "BBB/USDT"]
+    assert uni.choose(FlakyKlines({"AAAUSDT": ccxt.BadSymbol("gone")}), R, size=2, pause=0) == ["BBB/USDT", "CCC/USDT"]
+    with pytest.raises(RuntimeError):
+        uni.choose(FlakyKlines({"AAAUSDT": ccxt.RequestTimeout("slow")}), R, size=2, pause=0)
+
+
+def test_failed_refresh_keeps_the_previous_universe(tmp_path):
+    import ccxt
+    cfg = PortfolioConfig(strategy="breakout", universe="mature_volume", universe_size=2, state_file=str(tmp_path / "s.json"))
+    ex = FlakyKlines({})
+    ex.milliseconds = lambda: int(T("2025-01-01 04:01").timestamp() * 1000)
+    t = PortfolioTrader(cfg, ex, PaperPortfolioBroker(10_000, 0.001, 0.0))
+    t.universe, t.universe_date = ["OLD/USDT"], str(T("2024-10-01"))
+    ex.error_for = {"BBBUSDT": ccxt.NetworkError("down")}
+    import algo.universe as u
+    orig = u.choose
+    u.choose = lambda *a, **k: orig(*a, **{**k, "pause": 0})
+    try:
+        assert t.symbols_for(T("2025-01-01 00:00")) == ["OLD/USDT"] and t.universe_date == str(T("2024-10-01"))
+        ex.error_for = {}
+        assert t.symbols_for(T("2025-01-01 04:00")) == ["AAA/USDT", "BBB/USDT"] and t.universe_date == str(T("2025-01-01"))
+    finally:
+        u.choose = orig
+
+
+def test_one_rejected_order_does_not_block_the_others(tmp_path):
+    class Picky(PaperPortfolioBroker):
+        def market_sell(self, symbol, qty, price):
+            if symbol == "HALT/USDT":
+                raise RuntimeError("Market is closed.")
+            super().market_sell(symbol, qty, price)
+
+    b = Picky(1_000, 0.001, 0.0)
+    b.holdings = {"HALT/USDT": 10.0, "OK/USDT": 10.0}
+    t = PortfolioTrader(PortfolioConfig(strategy="breakout", universe="mature_volume", state_file=str(tmp_path / "s.json")), None, b)
+    prices = pd.Series({"HALT/USDT": 100.0, "OK/USDT": 100.0, "NEW/USDT": 50.0})
+    t.rebalance(pd.Series({"HALT/USDT": 0.0, "OK/USDT": 0.0, "NEW/USDT": 1 / 6}), prices)
+    assert "OK/USDT" not in b.holdings and b.holdings["HALT/USDT"] == 10.0 and b.holdings["NEW/USDT"] > 0
+    b.holdings["HALT/USDT"] = 10.0
+    n = len(b.fills)
+    t.rebalance(pd.Series({"HALT/USDT": 0.0, "NEW/USDT": 1 / 6}), prices, frozen={"HALT/USDT"})
+    assert all(f["symbol"] != "HALT/USDT" for f in b.fills[n:])   # a coin without a current candle is not traded
+
+
+def test_state_from_the_fixed_list_version_still_sells_old_coins(tmp_path):
+    f = tmp_path / "s.json"
+    f.write_text(json.dumps({"last_decision": "2025-06-30 16:00:00+00:00", "paper_cash": 5_000.0,
+                             "paper_holdings": {"OLD/USDT": 3.0}}))
+    cfg = PortfolioConfig(strategy="breakout", universe="mature_volume", symbols=["OLD/USDT", "BTC/USDT"], state_file=str(f))
+    t = PortfolioTrader(cfg, None, PaperPortfolioBroker(0, 0.001, 0.0))
+    assert "OLD/USDT" in t.positions and "BTC/USDT" in t.positions
+    with pytest.raises(ValueError):
+        PortfolioTrader(replace(cfg, strategy="momentum"), None, PaperPortfolioBroker(0, 0.001, 0.0))
+
+
+def test_forward_before_the_start_is_an_empty_ledger():
+    from algo import forward
+    coins = {"BTC/USDT": bars4h("2024-01-01", "2025-01-01", 0.0, 1e6, 1)}
+    fx = FakeExchange(coins)
+    cfg = PortfolioConfig(strategy="breakout", universe="mature_volume", confirm_tfs=("1d",), confirm="close>ema50")
+    orig = forward.HistoricalExchange
+    forward.HistoricalExchange = lambda *a, **k: fx.hx
+    try:
+        r = forward.run(cfg, None, T("2025-03-01"), T("2025-02-01"))
+    finally:
+        forward.HistoricalExchange = orig
+    assert r["equity"].empty and forward.summary(r, 10_000) == {"days": 0}

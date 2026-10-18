@@ -91,6 +91,7 @@
       "aggressive": {
         "top_k": 6
       }
-    }
+    },
+    "tag": "paper-v1"
   }
 }

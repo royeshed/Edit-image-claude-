@@ -5,3 +5,5 @@ data/
 .env
 *.log
 run/
+paper/
+paper_backtest_*/

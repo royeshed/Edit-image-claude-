@@ -171,6 +171,7 @@ class LivePortfolioBroker:
 
 class PortfolioTrader:
     tradable_only = True  # universe choice: only pairs trading now (a replay of the past also sees delisted ones)
+    tradable_at = None    # replay: fn(symbol, R) -> was the pair trading at R (see algo/forward.py)
 
     def __init__(self, cfg: PortfolioConfig, exchange, broker):
         self.cfg, self.ex, self.broker = cfg, exchange, broker
@@ -179,14 +180,18 @@ class PortfolioTrader:
         self.universe_date: str | None = None
         self.universe: list[str] = list(cfg.symbols)
         self.positions: list[str] = []  # symbols the bot holds, so coins that left the universe are still sold
-        if self.state_path.exists():
-            s = json.loads(self.state_path.read_text())
-            self.last_decision = s.get("last_decision")
-            self.universe_date = s.get("universe_date")
-            self.universe = s.get("universe", self.universe)
-            self.positions = s.get("positions", [])
-            if isinstance(broker, PaperPortfolioBroker) and "paper_cash" in s:
-                broker.cash, broker.holdings = s["paper_cash"], s["paper_holdings"]
+        if cfg.universe != "fixed" and cfg.strategy != "breakout":
+            raise ValueError("a changing universe is only implemented for the breakout strategy")
+        s = json.loads(self.state_path.read_text()) if self.state_path.exists() else {}
+        self.last_decision = s.get("last_decision")
+        self.universe_date = s.get("universe_date")
+        self.universe = s.get("universe", self.universe)
+        if isinstance(broker, PaperPortfolioBroker) and "paper_cash" in s:
+            broker.cash, broker.holdings = s["paper_cash"], s["paper_holdings"]
+        # A state from the fixed-list version (or no state) does not list positions: look at every coin the bot
+        # may have bought; those still held are kept and sold if they are no longer in the universe.
+        self.positions = s["positions"] if "positions" in s else \
+            list(dict.fromkeys([*cfg.symbols, *self.universe, *s.get("paper_holdings", {})]))
 
     def _save(self) -> None:
         s = {"last_decision": self.last_decision, "universe_date": self.universe_date, "universe": self.universe,
@@ -204,11 +209,31 @@ class PortfolioTrader:
             return list(self.cfg.symbols)
         R = uni.refresh_date(candle, self.cfg.universe_calendar)
         if self.universe_date != str(R):
-            self.universe = uni.choose(self.ex, R, self.cfg.universe_size, self.cfg.universe_min_age, self.tradable_only)
-            self.universe_date = str(R)
+            try:
+                chosen = uni.choose(self.ex, R, self.cfg.universe_size, self.cfg.universe_min_age, self.tradable_only,
+                                    tradable_at=self.tradable_at)
+            except Exception:
+                if not self.universe_date:
+                    raise
+                # keep trading the previous universe and try again on the next candle
+                log.exception("Universe for %s not chosen; keeping %s's for now", R.date(), self.universe_date[:10])
+                return self.universe
+            self.universe, self.universe_date = chosen, str(R)
             log.info("Universe for %s: %s", R.date(), " ".join(self.universe))
             self._save()
         return self.universe
+
+    def unmanaged(self, symbols) -> dict[str, float]:
+        """USD value of coins among `symbols` already in the account (worth >= min_trade_usd). The bot treats the
+        whole account as its own, so on a first live run these would be sold or resized."""
+        _, held = self.broker.balances(list(symbols))
+        out = {}
+        for s, q in held.items():
+            if q > 0:
+                v = q * float(self.ex.fetch_ticker(s)["last"])
+                if v >= self.cfg.min_trade_usd:
+                    out[s] = v
+        return out
 
     def bars(self, symbols: list[str] | None = None) -> dict[str, pd.DataFrame]:
         """close/high/low panels of closed candles for `symbols` (default: the configured ones)."""
@@ -223,20 +248,22 @@ class PortfolioTrader:
         return {k: pd.DataFrame({s: f[k] for s, f in frames.items()}).iloc[:-1]  # last candle is still forming
                 for k in ("close", "high", "low")}
 
-    def rebalance(self, weights: pd.Series, prices: pd.Series) -> None:
+    def rebalance(self, weights: pd.Series, prices: pd.Series, frozen: set[str] = frozenset()) -> None:
+        """Trade toward `weights` (fractions of equity). Coins in `frozen` (no candle on the decision bar,
+        e.g. a halted market) count in equity at their last price but are not traded."""
         symbols = [s for s in weights.index if pd.notna(prices.get(s))]
         cash, held = self.broker.balances(symbols)
         equity = cash + sum(held[s] * prices[s] for s in symbols)
-        delta = {s: weights[s] * equity / prices[s] - held[s] for s in symbols}
+        delta = {s: weights[s] * equity / prices[s] - held[s] for s in symbols if s not in frozen}
         log.info("Rebalance: equity %.2f, targets %s", equity, {s: f"{w:.1%}" for s, w in weights.items() if w > 0})
-        # Sells first so their proceeds fund the buys.
-        for s in sorted(delta, key=lambda k: delta[k]):
+        # Sells first (largest first) so their proceeds fund the buys.
+        for s in sorted(delta, key=lambda k: delta[k] * prices[k]):
             notional = abs(delta[s]) * prices[s]
             if notional < self.cfg.min_trade_usd:
                 continue
             try:
                 (self.broker.market_sell if delta[s] < 0 else self.broker.market_buy)(s, abs(delta[s]), prices[s])
-            except OrderRejected as e:
+            except Exception as e:  # one rejected pair (halted market, minimum size...) must not block the others
                 log.warning("Skipped %s: %s", s, e)
 
     def step(self) -> bool:
@@ -272,7 +299,7 @@ class PortfolioTrader:
         live = [s for s in universe if s in closes.columns]
         weights = breakout_weights({k: v[live] for k, v in bars.items()}, self.cfg).reindex(closes.columns).fillna(0.0)
         prices = closes.ffill().iloc[-1]
-        self.rebalance(weights, prices)
+        self.rebalance(weights, prices, frozen=set(closes.columns[closes.iloc[-1].isna()]))
         _, held = self.broker.balances(list(closes.columns))
         unpriced = [s for s in self.positions if s not in closes.columns]   # keep tracking coins we could not price
         self.positions = unpriced + [s for s in closes.columns if held.get(s, 0) * prices[s] >= self.cfg.min_trade_usd]

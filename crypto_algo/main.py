@@ -131,7 +131,19 @@ def cmd_portfolio(args, cfg: Config, live: bool) -> None:
         exchange = make_exchange(cfg.exchange)
         broker = PaperPortfolioBroker(cfg.initial_capital, cfg.costs.fee_rate, cfg.costs.slippage)
         pcfg.state_file = "paper_" + pcfg.state_file
-    PortfolioTrader(pcfg, exchange, broker).run()
+    first_run = not Path(pcfg.state_file).exists()
+    trader = PortfolioTrader(pcfg, exchange, broker)
+    if live and first_run and not args.adopt_holdings:
+        import pandas as pd
+
+        step = pd.Timedelta(pcfg.timeframe)
+        coins = set(pcfg.symbols) | set(trader.symbols_for(trader.now().floor(step) - step))
+        held = trader.unmanaged(coins)
+        if held:
+            sys.exit("This account already holds " + ", ".join(f"{s} (${v:,.0f})" for s, v in held.items()) +
+                     ". The bot manages the whole account and would sell or resize them. Use a dedicated "
+                     "sub-account, or pass --adopt-holdings to let the bot manage these coins.")
+    trader.run()
 
 
 def cmd_forward(args, cfg: Config) -> None:
@@ -149,14 +161,29 @@ def cmd_forward(args, cfg: Config) -> None:
     capital = paper.get("capital", cfg.initial_capital)
     logging.getLogger("algo").setLevel(logging.WARNING)
     exchange = make_exchange(cfg.exchange)
-    out = Path(args.out)
+    out = Path(args.out if not (args.start and args.out == "paper") else f"paper_backtest_{start:%Y%m%d}")
     out.mkdir(parents=True, exist_ok=True)
-    report = {}
-    for name, overrides in paper.get("profiles", {"standard": {}}).items():
-        pcfg = PortfolioConfig(**{**raw["portfolio"], **overrides})
-        r = forward.run(pcfg, exchange, start, capital=capital, fee_rate=cfg.costs.fee_rate, slippage=cfg.costs.slippage)
+    profiles = {name: PortfolioConfig(**{**raw["portfolio"], **o}) for name, o in paper.get("profiles", {"standard": {}}).items()}
+    step = pd.Timedelta(next(iter(profiles.values())).timeframe)
+    end = pd.Timestamp.now(tz="UTC").floor(step)                      # one end for every profile
+    hx = forward.HistoricalExchange(exchange, start - pd.Timedelta(hours=max(p.history_hours for p in profiles.values()) + 48))
+    import subprocess
+
+    try:
+        version = subprocess.run(["git", "describe", "--tags", "--always", "--dirty"], capture_output=True, text=True).stdout.strip()
+    except OSError:
+        version = "unknown"
+    official = version == paper.get("tag", "paper-v1") and not args.start   # exactly the tagged commit, clean tree
+    print(f"code {version}: " + ("the frozen paper rules" if official else
+          "NOT the frozen paper rules (other code or --start): a backtest, not the paper record"))
+    report = {"code": version, "official_paper_record": official, "start": str(start), "end": str(end)}
+    if end < start:
+        print(f"Paper trading starts at {start}; nothing to report yet.")
+    for name, pcfg in profiles.items():
+        overrides = paper.get("profiles", {}).get(name, {})
+        r = forward.run(pcfg, exchange, start, end, capital=capital, fee_rate=cfg.costs.fee_rate, slippage=cfg.costs.slippage, hx=hx)
         s = forward.summary(r, capital)
-        report[name] = s
+        report[name] = {"config": {**raw["portfolio"], **overrides}, **s}
         r["equity"].to_csv(out / f"{name}_equity.csv")
         r["fills"].to_csv(out / f"{name}_fills.csv", index=False)
         print(f"\n== {name} ({overrides or 'config.json'})")
@@ -202,6 +229,7 @@ def main() -> None:
     p.add_argument("--start", help="portfolio-forward: replay from this date instead of the frozen paper start")
     p.add_argument("--out", default="paper", help="portfolio-forward: where to write the ledgers")
     p.add_argument("--i-understand-the-risk", action="store_true")
+    p.add_argument("--adopt-holdings", action="store_true", help="portfolio-live: let the bot manage coins already in the account")
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args()
 
