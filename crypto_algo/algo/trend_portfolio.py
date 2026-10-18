@@ -38,7 +38,7 @@ from . import universe as uni
 from .broker import OrderRejected
 from .data import fetch_ohlcv
 from .htf import confirmation, confirmed_breakouts
-from .profile import volume_profile
+from .profile import atr_panel, cmf_panel, volume_profile
 
 log = logging.getLogger(__name__)
 
@@ -65,6 +65,8 @@ class PortfolioConfig:
     rank_days: int = 14              # breakout: momentum window used to rank coins for top_k
     max_slots: float = 0             # breakout: risk dial, max weight per coin = 1/max_slots (0 = number of coins)
     volume_profile: bool = False     # breakout: enter only above the 30-day value-area high, exit below its POC
+    atr_expansion: bool = False      # breakout: enter only while ATR(5) > ATR(20) (volatility expanding)
+    cmf_exit: float | None = None    # breakout: exit when Chaikin money flow(20) falls below this (e.g. -0.1)
     universe: str = "fixed"          # "fixed" (trade `symbols`) or "mature_volume" (re-chosen each refresh, algo/universe.py)
     universe_size: int = 15
     universe_min_age: int = 365      # days of uninterrupted daily history a coin needs to be chosen
@@ -100,6 +102,12 @@ def breakout_weights(bars: dict[str, pd.DataFrame], cfg: PortfolioConfig) -> pd.
     if cfg.volume_profile:
         poc, vah = volume_profile(bars["high"], bars["low"], c, bars["volume"])
         entry_ok, exit_now = c > vah, c < poc
+    if cfg.atr_expansion:
+        exp = atr_panel(bars["high"], bars["low"], c, 5) > atr_panel(bars["high"], bars["low"], c, 20)
+        entry_ok = exp if entry_ok is None else entry_ok & exp
+    if cfg.cmf_exit is not None:
+        out = cmf_panel(bars["high"], bars["low"], c, bars["volume"]) < cfg.cmf_exit
+        exit_now = out if exit_now is None else exit_now | out
     size = confirmed_breakouts(bars, systems, confirm, cfg.confirm_mode, entry_ok, exit_now).iloc[-1]
     live = c.iloc[-1].notna()
     size = size.where(live, 0.0)

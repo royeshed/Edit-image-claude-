@@ -44,3 +44,17 @@ def volume_profile(high: pd.DataFrame, low: pd.DataFrame, close: pd.DataFrame, v
     hold = round(pd.Timedelta("1D") / step) if step <= pd.Timedelta("1D") else 1
     mk = lambda a: pd.DataFrame(a, index=close.index, columns=close.columns).ffill(limit=hold - 1)
     return (mk(poc), mk(vah), mk(val)) if with_val else (mk(poc), mk(vah))
+
+
+def atr_panel(high: pd.DataFrame, low: pd.DataFrame, close: pd.DataFrame, n: int) -> pd.DataFrame:
+    """Wilder's average true range of every column."""
+    c1 = close.shift()
+    tr = np.maximum(high - low, np.maximum((high - c1).abs(), (low - c1).abs()))
+    return tr.ewm(alpha=1 / n, adjust=False).mean()
+
+
+def cmf_panel(high: pd.DataFrame, low: pd.DataFrame, close: pd.DataFrame, volume: pd.DataFrame, n: int = 20) -> pd.DataFrame:
+    """Chaikin money flow: volume-weighted position of each close inside its candle, over n candles (-1..1)."""
+    rng = (high - low).replace(0, np.nan)
+    mfm = ((close - low) - (high - close)) / rng
+    return (mfm * volume).rolling(n).sum() / volume.rolling(n).sum()

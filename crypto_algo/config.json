@@ -97,6 +97,12 @@
       "aggressive_profile": {
         "top_k": 6,
         "volume_profile": true
+      },
+      "aggressive_best": {
+        "top_k": 6,
+        "volume_profile": true,
+        "atr_expansion": true,
+        "cmf_exit": -0.1
       }
     }
   }

@@ -37,3 +37,13 @@ def test_poc_sits_where_the_volume_traded():
     heavy = c["A"].iloc[200:260]
     assert heavy.min() * 0.97 <= poc["A"].loc[t] <= heavy.max() * 1.03
     assert vah["A"].loc[t] >= poc["A"].loc[t]
+
+
+def test_atr_and_cmf_are_trailing_and_bounded():
+    from algo.profile import atr_panel, cmf_panel
+    h, l, c, v = _bars()
+    a, m = atr_panel(h, l, c, 14), cmf_panel(h, l, c, v)
+    T = c.index[250]
+    pd.testing.assert_frame_equal(a.loc[:T], atr_panel(h.loc[:T], l.loc[:T], c.loc[:T], 14))
+    pd.testing.assert_frame_equal(m.loc[:T], cmf_panel(h.loc[:T], l.loc[:T], c.loc[:T], v.loc[:T]))
+    assert (a.dropna() > 0).all().all() and m.dropna().abs().max().max() <= 1
