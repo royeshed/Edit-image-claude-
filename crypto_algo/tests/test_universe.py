@@ -73,6 +73,8 @@ class FakeExchange:
                                       "status": "TRADING"} for s in coins]}
 
     def _full(self, symbol, tf):
+        if symbol not in self.coins:  # like the exchange: no candles for a pair it does not have
+            return pd.DataFrame(columns=["open", "high", "low", "close", "volume", "quote_volume"], index=pd.DatetimeIndex([], tz="UTC"))
         d4 = self.coins[symbol]
         if tf == "4h":
             return d4
@@ -229,3 +231,94 @@ def test_forward_before_the_start_is_an_empty_ledger():
     finally:
         forward.HistoricalExchange = orig
     assert r["equity"].empty and forward.summary(r, 10_000) == {"days": 0}
+
+
+class FakeAccount:
+    """Just enough of a ccxt exchange for the live broker and the startup guard."""
+
+    def __init__(self, total: dict[str, float], prices: dict[str, float]):
+        self.total, self.prices = total, prices
+        self.markets = {f"{c}/USDT": {"base": c} for c in prices}
+
+    def load_markets(self):
+        return self.markets
+
+    def market(self, s):
+        return self.markets[s]
+
+    def fetch_balance(self):
+        return {"total": dict(self.total), "free": dict(self.total)}
+
+    def fetch_ticker(self, s):
+        return {"last": self.prices[s.split("/")[0]]}
+
+
+def _live_args(adopt=False):
+    import argparse
+    return argparse.Namespace(config=str(Path(__file__).resolve().parents[1] / "config.json"), i_understand_the_risk=True,
+                              adopt_holdings=adopt)
+
+
+def test_live_guard_refuses_every_start_until_holdings_are_adopted(tmp_path, monkeypatch):
+    import main
+    from algo import trend_portfolio as tp
+    from algo.config import Config
+    acct = FakeAccount({"USDT": 5_000, "SUI": 1_000, "DUST": 1}, {"SUI": 3.0, "DUST": 0.5})
+    monkeypatch.setenv("EXCHANGE_API_KEY", "k")
+    monkeypatch.setenv("EXCHANGE_API_SECRET", "s")
+    monkeypatch.setattr(main, "make_exchange", lambda *a, **k: acct)
+    monkeypatch.chdir(tmp_path)
+    ran = []
+    monkeypatch.setattr(tp.PortfolioTrader, "run", lambda self, *a, **k: ran.append(self))
+    cfg = Config.load(_live_args().config)
+    for _ in range(2):  # a refused start must not let the next one through
+        with pytest.raises(SystemExit, match="SUI/USDT"):
+            main.cmd_portfolio(_live_args(), cfg, live=True)
+        assert not ran
+    main.cmd_portfolio(_live_args(adopt=True), cfg, live=True)
+    assert ran and ran[0].account_checked and "SUI/USDT" in ran[0].positions and "DUST/USDT" not in ran[0].positions
+    main.cmd_portfolio(_live_args(), cfg, live=True)  # adopted once: later starts run without the flag
+    assert len(ran) == 2
+
+
+def test_candle_download_errors_retry_or_abort_but_unknown_pairs_are_skipped(tmp_path, monkeypatch):
+    import ccxt
+    from algo import trend_portfolio as tp
+    monkeypatch.setattr(tp.time, "sleep", lambda s: None)
+    calls = {"n": 0}
+
+    def fake_fetch(ex, symbol, tf, since):
+        if symbol == "GONE/USDT":
+            raise ccxt.BadSymbol("unknown")
+        calls["n"] += 1
+        if symbol == "SLOW/USDT" and calls["n"] < 3:
+            raise ccxt.RequestTimeout("timeout")
+        if symbol == "DOWN/USDT":
+            raise ccxt.ExchangeNotAvailable("down")
+        idx = pd.date_range(T("2025-01-01"), periods=10, freq="4h")
+        return pd.DataFrame({"open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1.0}, index=idx)
+
+    monkeypatch.setattr(tp, "fetch_ohlcv", fake_fetch)
+    t = PortfolioTrader(PortfolioConfig(strategy="breakout", state_file=str(tmp_path / "s.json")), None, PaperPortfolioBroker(0, 0, 0))
+    t.now = lambda: T("2025-01-03")
+    b = t.bars(["SLOW/USDT", "GONE/USDT"])
+    assert list(b["close"].columns) == ["SLOW/USDT"]          # retried, and the unknown pair skipped
+    with pytest.raises(ccxt.ExchangeNotAvailable):
+        t.bars(["DOWN/USDT"])                                   # never decide on partial data
+
+
+def test_transient_order_errors_finish_the_other_orders_then_retry(tmp_path):
+    import ccxt
+
+    class Flaky(PaperPortfolioBroker):
+        def market_sell(self, symbol, qty, price):
+            if symbol == "SLOW/USDT":
+                raise ccxt.RequestTimeout("timeout")
+            super().market_sell(symbol, qty, price)
+
+    b = Flaky(1_000, 0.001, 0.0)
+    b.holdings = {"SLOW/USDT": 10.0, "OK/USDT": 10.0}
+    t = PortfolioTrader(PortfolioConfig(strategy="breakout", universe="mature_volume", state_file=str(tmp_path / "s.json")), None, b)
+    with pytest.raises(ccxt.RequestTimeout):
+        t.rebalance(pd.Series({"SLOW/USDT": 0.0, "OK/USDT": 0.0}), pd.Series({"SLOW/USDT": 100.0, "OK/USDT": 100.0}))
+    assert "OK/USDT" not in b.holdings and b.holdings["SLOW/USDT"] == 10.0

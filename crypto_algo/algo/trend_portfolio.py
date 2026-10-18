@@ -30,6 +30,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import ccxt
 import numpy as np
 import pandas as pd
 
@@ -153,6 +154,18 @@ class LivePortfolioBroker:
         free = self.ex.fetch_balance()["free"]
         return float(free.get(self.quote) or 0), {s: float(free.get(self.ex.market(s)["base"]) or 0) for s in symbols}
 
+    def coins_usd(self, min_usd: float) -> dict[str, float]:
+        """Every coin in the account (free, in orders or locked) worth at least `min_usd`, valued in the quote."""
+        out = {}
+        for cur, qty in self.ex.fetch_balance()["total"].items():
+            sym = f"{cur}/{self.quote}"
+            if cur == self.quote or not qty or sym not in self.ex.markets:
+                continue
+            value = float(qty) * float(self.ex.fetch_ticker(sym)["last"] or 0)
+            if value >= min_usd:
+                out[sym] = value
+        return out
+
     def _qty(self, symbol: str, qty: float, price: float) -> float:
         qty = float(self.ex.amount_to_precision(symbol, qty))
         limits = self.ex.market(symbol).get("limits", {})
@@ -185,6 +198,7 @@ class PortfolioTrader:
         s = json.loads(self.state_path.read_text()) if self.state_path.exists() else {}
         self.last_decision = s.get("last_decision")
         self.universe_date = s.get("universe_date")
+        self.account_checked = s.get("account_checked", False)   # live: coins already in the account were reviewed
         self.universe = s.get("universe", self.universe)
         if isinstance(broker, PaperPortfolioBroker) and "paper_cash" in s:
             broker.cash, broker.holdings = s["paper_cash"], s["paper_holdings"]
@@ -195,7 +209,7 @@ class PortfolioTrader:
 
     def _save(self) -> None:
         s = {"last_decision": self.last_decision, "universe_date": self.universe_date, "universe": self.universe,
-             "positions": self.positions}
+             "positions": self.positions, "account_checked": self.account_checked}
         if isinstance(self.broker, PaperPortfolioBroker):
             s["paper_cash"], s["paper_holdings"] = self.broker.cash, self.broker.holdings
         self.state_path.write_text(json.dumps(s, indent=2))
@@ -213,7 +227,7 @@ class PortfolioTrader:
                 chosen = uni.choose(self.ex, R, self.cfg.universe_size, self.cfg.universe_min_age, self.tradable_only,
                                     tradable_at=self.tradable_at)
             except Exception:
-                if not self.universe_date:
+                if not self.universe_date or self.tradable_at is not None:   # a replay must never fall back
                     raise
                 # keep trading the previous universe and try again on the next candle
                 log.exception("Universe for %s not chosen; keeping %s's for now", R.date(), self.universe_date[:10])
@@ -223,28 +237,23 @@ class PortfolioTrader:
             self._save()
         return self.universe
 
-    def unmanaged(self, symbols) -> dict[str, float]:
-        """USD value of coins among `symbols` already in the account (worth >= min_trade_usd). The bot treats the
-        whole account as its own, so on a first live run these would be sold or resized."""
-        _, held = self.broker.balances(list(symbols))
-        out = {}
-        for s, q in held.items():
-            if q > 0:
-                v = q * float(self.ex.fetch_ticker(s)["last"])
-                if v >= self.cfg.min_trade_usd:
-                    out[s] = v
-        return out
-
     def bars(self, symbols: list[str] | None = None) -> dict[str, pd.DataFrame]:
         """close/high/low panels of closed candles for `symbols` (default: the configured ones)."""
         symbols = list(self.cfg.symbols) if symbols is None else symbols
         since = self.now() - pd.Timedelta(hours=self.cfg.history_hours + 8)
         frames = {}
         for s in symbols:
-            try:
-                frames[s] = fetch_ohlcv(self.ex, s, self.cfg.timeframe, since)
-            except Exception as e:  # a halted pair: no new signal, and held coins are priced from the last close
-                log.warning("No %s candles for %s: %s", self.cfg.timeframe, s, e)
+            for attempt in range(3):
+                try:
+                    frames[s] = fetch_ohlcv(self.ex, s, self.cfg.timeframe, since)
+                    break
+                except ccxt.OperationFailed:          # timeout, rate limit, exchange down: never decide on partial data
+                    if attempt == 2:
+                        raise
+                    time.sleep(2 ** attempt)
+                except (ccxt.BadSymbol, RuntimeError) as e:  # unknown pair or no candles: a halted or delisted market
+                    log.warning("No %s candles for %s: %s", self.cfg.timeframe, s, e)
+                    break
         return {k: pd.DataFrame({s: f[k] for s, f in frames.items()}).iloc[:-1]  # last candle is still forming
                 for k in ("close", "high", "low")}
 
@@ -257,14 +266,20 @@ class PortfolioTrader:
         delta = {s: weights[s] * equity / prices[s] - held[s] for s in symbols if s not in frozen}
         log.info("Rebalance: equity %.2f, targets %s", equity, {s: f"{w:.1%}" for s, w in weights.items() if w > 0})
         # Sells first (largest first) so their proceeds fund the buys.
+        retry = None
         for s in sorted(delta, key=lambda k: delta[k] * prices[k]):
             notional = abs(delta[s]) * prices[s]
             if notional < self.cfg.min_trade_usd:
                 continue
             try:
                 (self.broker.market_sell if delta[s] < 0 else self.broker.market_buy)(s, abs(delta[s]), prices[s])
-            except Exception as e:  # one rejected pair (halted market, minimum size...) must not block the others
+            except ccxt.OperationFailed as e:  # timeout, rate limit, exchange down: retry the candle at the next poll
+                log.warning("Order for %s failed, will retry: %s", s, e)
+                retry = retry or e
+            except Exception as e:  # rejected for good (halted market, minimum size...): must not block the others
                 log.warning("Skipped %s: %s", s, e)
+        if retry:
+            raise retry
 
     def step(self) -> bool:
         if self.cfg.universe != "fixed":

@@ -13,6 +13,7 @@ This is the "mature_volume" rule of research/universe_selection.py, chosen on 20
 A universe chosen at R governs decisions on 4h candles that open at or after R; decisions on earlier
 candles keep the previous universe.
 """
+import itertools
 import logging
 import re
 import time
@@ -119,7 +120,7 @@ def choose(exchange, R: pd.Timestamp, size: int = 15, min_age: int = 365, tradab
     if failed:
         raise RuntimeError(f"universe for {R.date()} not chosen: no daily candles for {len(failed)} pairs ({', '.join(failed[:5])}...)")
     ranked = select(daily, R, len(daily), min_age)
-    chosen = [s for s in ranked if tradable_at is None or tradable_at(s, R)][:size] if tradable_at else ranked[:size]
+    chosen = list(itertools.islice((s for s in ranked if tradable_at(s, R)), size)) if tradable_at else ranked[:size]
     if not chosen:
         raise RuntimeError(f"universe for {R.date()} not chosen: no eligible coin among {len(daily)} pairs")
     return chosen

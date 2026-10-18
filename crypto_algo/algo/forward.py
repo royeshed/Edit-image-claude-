@@ -11,7 +11,9 @@ candle close), and anyone can re-run it to check.
 """
 import json
 import logging
+import subprocess
 import tempfile
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -23,6 +25,7 @@ from .trend_portfolio import PaperPortfolioBroker, PortfolioConfig, PortfolioTra
 
 log = logging.getLogger(__name__)
 MS = {"1h": 3_600_000, "4h": 14_400_000, "1d": 86_400_000}
+PAPER_TAG = "paper-v1"   # the git tag that freezes the paper rules (code and config.json)
 
 
 class HistoricalExchange:
@@ -60,12 +63,25 @@ class HistoricalExchange:
                 f = self.local / f"{symbol.replace('/', '')}_{tf}.csv"
                 d = pd.read_csv(f, index_col=0) if f.exists() else pd.DataFrame(columns=["open", "high", "low", "close", "volume", "quote_volume"])
                 d.index = pd.to_datetime(d.index, utc=True)
-            elif tf == "1d":
-                d = self._daily_from_exchange(symbol)
             else:
-                d = fetch_ohlcv(self.ex, symbol, tf, self.history_start)
+                d = self._download(symbol, tf)
             self._series[key] = d[d.index >= self.history_start - pd.Timedelta(days=1100 if tf == "1d" else 0)]
         return self._series[key]
+
+    def _download(self, symbol: str, tf: str, retries: int = 4) -> pd.DataFrame:
+        """Full history from the exchange; network errors are retried, then raised (never a silent gap)."""
+        import ccxt
+
+        for attempt in range(retries):
+            try:
+                return self._daily_from_exchange(symbol) if tf == "1d" else fetch_ohlcv(self.ex, symbol, tf, self.history_start)
+            except RuntimeError:              # the pair has no candles in this window
+                return pd.DataFrame(columns=["open", "high", "low", "close", "volume", "quote_volume"],
+                                    index=pd.DatetimeIndex([], tz="UTC"))
+            except ccxt.OperationFailed:
+                if attempt == retries - 1:
+                    raise
+                time.sleep(2 * 2 ** attempt)
 
     def _daily_from_exchange(self, symbol: str) -> pd.DataFrame:
         rows, cursor = [], int((self.history_start - pd.Timedelta(days=1100)).timestamp() * 1000)
@@ -145,6 +161,22 @@ def run(cfg: PortfolioConfig, exchange, start: pd.Timestamp, end: pd.Timestamp |
             "holdings": dict(broker.holdings), "btc": btc}
 
 
+def is_official(config_path: str | Path, custom_start: bool, start: pd.Timestamp) -> tuple[bool, str]:
+    """(official, commit): the paper record is only a run of the commit tagged PAPER_TAG, with no change to the
+    code or config.json (tracked or not), with that config.json, from its own start date, tagged before that date."""
+    repo = Path(__file__).resolve().parents[1]
+    git = lambda *a: subprocess.run(["git", *a], cwd=repo, capture_output=True, text=True).stdout.strip()
+    try:
+        head, tagged = git("rev-parse", "HEAD"), git("rev-parse", "-q", "--verify", f"{PAPER_TAG}^{{commit}}")
+        changed = git("status", "--porcelain", "--", "algo", "main.py", "config.json")
+        tagged_at = git("log", "-1", "--format=%cI", tagged) if tagged else ""
+    except OSError:
+        return False, "unknown"
+    own_config = Path(config_path).resolve() == (repo / "config.json").resolve()
+    before_start = bool(tagged_at) and pd.Timestamp(tagged_at).tz_convert("UTC") <= start
+    return bool(tagged) and head == tagged and not changed and own_config and not custom_start and before_start, head or "unknown"
+
+
 def summary(r: dict, capital: float) -> dict:
     eq = r["equity"]
     if eq.empty:
@@ -154,7 +186,7 @@ def summary(r: dict, capital: float) -> dict:
     fills = r["fills"]
     return {"from": str(eq.index[0]), "to": str(eq.index[-1]), "days": round(days, 1), "start_usd": capital,
             "end_usd": round(eq.iloc[-1], 2), "return": total,
-            "annualised": (1 + total) ** (365 / days) - 1 if days >= 30 else None,
+            "annualised": (1 + total) ** (365 / days) - 1 if days >= 365 else None,   # meaningless over shorter spans
             "max_drawdown": float((eq / eq.cummax() - 1).min()), "trades": len(fills),
             "fees_usd": round(float(fills.fee.sum()), 2) if len(fills) else 0.0,
             "btc_hold_return": r["btc"].iloc[-1] / capital - 1, "holdings": sorted(r["holdings"]),
