@@ -25,7 +25,7 @@ from .trend_portfolio import PaperPortfolioBroker, PortfolioConfig, PortfolioTra
 
 log = logging.getLogger(__name__)
 MS = {"1h": 3_600_000, "4h": 14_400_000, "1d": 86_400_000}
-PAPER_TAG = "paper-v1"   # the git tag that freezes the paper rules (code and config.json)
+PAPER_TAG = "paper-v2"   # the git tag that freezes the paper rules (code and config.json)
 
 
 class HistoricalExchange:

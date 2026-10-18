@@ -38,6 +38,7 @@ from . import universe as uni
 from .broker import OrderRejected
 from .data import fetch_ohlcv
 from .htf import confirmation, confirmed_breakouts
+from .profile import volume_profile
 
 log = logging.getLogger(__name__)
 
@@ -63,6 +64,7 @@ class PortfolioConfig:
     top_k: int = 0                   # breakout: hold only the k strongest coins in a trend (0 = all)
     rank_days: int = 14              # breakout: momentum window used to rank coins for top_k
     max_slots: float = 0             # breakout: risk dial, max weight per coin = 1/max_slots (0 = number of coins)
+    volume_profile: bool = False     # breakout: enter only above the 30-day value-area high, exit below its POC
     universe: str = "fixed"          # "fixed" (trade `symbols`) or "mature_volume" (re-chosen each refresh, algo/universe.py)
     universe_size: int = 15
     universe_min_age: int = 365      # days of uninterrupted daily history a coin needs to be chosen
@@ -94,7 +96,11 @@ def breakout_weights(bars: dict[str, pd.DataFrame], cfg: PortfolioConfig) -> pd.
     c = bars["close"]
     systems = [(n, m) for n in cfg.entries for m in cfg.exits]
     confirm = confirmation(bars, c.index, cfg.confirm_tfs, cfg.confirm) if cfg.confirm_tfs else None
-    size = confirmed_breakouts(bars, systems, confirm, cfg.confirm_mode).iloc[-1]
+    entry_ok = exit_now = None
+    if cfg.volume_profile:
+        poc, vah = volume_profile(bars["high"], bars["low"], c, bars["volume"])
+        entry_ok, exit_now = c > vah, c < poc
+    size = confirmed_breakouts(bars, systems, confirm, cfg.confirm_mode, entry_ok, exit_now).iloc[-1]
     live = c.iloc[-1].notna()
     size = size.where(live, 0.0)
     if cfg.top_k:
@@ -255,7 +261,7 @@ class PortfolioTrader:
                     log.warning("No %s candles for %s: %s", self.cfg.timeframe, s, e)
                     break
         return {k: pd.DataFrame({s: f[k] for s, f in frames.items()}).iloc[:-1]  # last candle is still forming
-                for k in ("close", "high", "low")}
+                for k in ("close", "high", "low", "volume")}
 
     def rebalance(self, weights: pd.Series, prices: pd.Series, frozen: set[str] = frozenset()) -> None:
         """Trade toward `weights` (fractions of equity). Coins in `frozen` (no candle on the decision bar,

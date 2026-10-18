@@ -65,11 +65,13 @@ def confirmation(bars: dict, base_index: pd.DatetimeIndex, tfs, name: str) -> pd
     return out
 
 
-def confirmed_breakouts(p: dict, systems, confirm: pd.DataFrame | None, mode: str = "entry") -> pd.DataFrame:
+def confirmed_breakouts(p: dict, systems, confirm: pd.DataFrame | None, mode: str = "entry",
+                        entry_ok: pd.DataFrame | None = None, exit_now: pd.DataFrame | None = None) -> pd.DataFrame:
     """Average position of breakout systems (entry n-bar high, exit m-bar low) with optional HTF confirmation.
 
     mode "entry": a system may only enter while `confirm` is true; it exits on its own rule.
     mode "gate":  as "entry", and the position is also closed whenever `confirm` turns false.
+    entry_ok / exit_now: extra conditions every system must meet to enter / that close every system.
     """
     c = p["close"]
     total = 0
@@ -80,5 +82,9 @@ def confirmed_breakouts(p: dict, systems, confirm: pd.DataFrame | None, mode: st
             e = e & confirm
             if mode == "gate":
                 x = x | ~confirm
+        if entry_ok is not None:
+            e = e & entry_ok
+        if exit_now is not None:
+            x = x | exit_now
         total = total + state(e, x)
     return total / len(systems)

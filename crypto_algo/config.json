@@ -84,12 +84,19 @@
     "universe_calendar": "Q-jan"
   },
   "paper": {
-    "start": "2026-10-18 20:00",
+    "start": "2026-10-18 16:00",
     "capital": 10000,
     "profiles": {
       "standard": {},
       "aggressive": {
         "top_k": 6
+      },
+      "standard_profile": {
+        "volume_profile": true
+      },
+      "aggressive_profile": {
+        "top_k": 6,
+        "volume_profile": true
       }
     }
   }
