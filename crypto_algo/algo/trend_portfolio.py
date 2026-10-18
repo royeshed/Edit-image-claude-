@@ -67,6 +67,7 @@ class PortfolioConfig:
     volume_profile: bool = False     # breakout: enter only above the 30-day value-area high, exit below its POC
     atr_expansion: bool = False      # breakout: enter only while ATR(5) > ATR(20) (volatility expanding)
     cmf_exit: float | None = None    # breakout: exit when Chaikin money flow(20) falls below this (e.g. -0.1)
+    breakout_volume: float | None = None  # breakout: enter only when the candle's volume > this x its 20-candle average
     universe: str = "fixed"          # "fixed" (trade `symbols`) or "mature_volume" (re-chosen each refresh, algo/universe.py)
     universe_size: int = 15
     universe_min_age: int = 365      # days of uninterrupted daily history a coin needs to be chosen
@@ -105,6 +106,10 @@ def breakout_weights(bars: dict[str, pd.DataFrame], cfg: PortfolioConfig) -> pd.
     if cfg.atr_expansion:
         exp = atr_panel(bars["high"], bars["low"], c, 5) > atr_panel(bars["high"], bars["low"], c, 20)
         entry_ok = exp if entry_ok is None else entry_ok & exp
+    if cfg.breakout_volume:
+        vol = bars["volume"]
+        loud = vol > cfg.breakout_volume * vol.rolling(20).mean().shift()
+        entry_ok = loud if entry_ok is None else entry_ok & loud
     if cfg.cmf_exit is not None:
         out = cmf_panel(bars["high"], bars["low"], c, bars["volume"]) < cfg.cmf_exit
         exit_now = out if exit_now is None else exit_now | out
