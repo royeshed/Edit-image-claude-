@@ -10,12 +10,14 @@ import pandas as pd
 
 
 def volume_profile(high: pd.DataFrame, low: pd.DataFrame, close: pd.DataFrame, volume: pd.DataFrame,
-                   window: int = 180, bins: int = 24) -> tuple[pd.DataFrame, pd.DataFrame]:
+                   window: int = 180, bins: int = 24, with_val: bool = False):
+    """(POC, VAH), or (POC, VAH, VAL) with with_val (VAL = bottom of the value area)."""
     h, l, c = high.to_numpy(float), low.to_numpy(float), close.to_numpy(float)
     tp = (h + l + c) / 3
     w = volume.to_numpy(float) * tp
     poc = np.full(c.shape, np.nan)
     vah = np.full(c.shape, np.nan)
+    val = np.full(c.shape, np.nan)
     step = close.index[1] - close.index[0] if len(close.index) > 1 else pd.Timedelta("4h")
     days = np.flatnonzero(((close.index + step).hour == 0) & ((close.index + step).minute == 0))
     for j in range(c.shape[1]):
@@ -38,6 +40,7 @@ def volume_profile(high: pd.DataFrame, low: pd.DataFrame, close: pd.DataFrame, v
             order = np.argsort(hist, kind="stable")[::-1]
             keep = order[: np.searchsorted(np.cumsum(hist[order]), 0.7 * hist.sum()) + 1]
             vah[t, j] = edges[keep.max() + 1]
+            val[t, j] = edges[keep.min()]
     hold = round(pd.Timedelta("1D") / step) if step <= pd.Timedelta("1D") else 1
     mk = lambda a: pd.DataFrame(a, index=close.index, columns=close.columns).ffill(limit=hold - 1)
-    return mk(poc), mk(vah)
+    return (mk(poc), mk(vah), mk(val)) if with_val else (mk(poc), mk(vah))
