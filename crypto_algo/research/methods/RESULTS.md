@@ -57,3 +57,11 @@ One look at the locked year (2025-10-01..now), rule fixed before: the combinatio
 
 Decision: the declared combination fails, so the current bot is kept. Monthly refresh alone was better on every
 period including the locked year, but that is an after-the-fact reading of the one look; it needs forward (paper) evidence.
+
+## Geometry batch (research/methods/geometry.py), October 2026
+
+10 ideas on exits, channel lengths, trailing stops and the daily confirmation. Locked year not used.
+Passed all tests: faster breakout channels 20/50/100 (train Sharpe 1.91 vs 1.83, +105% vs +97%/yr, 9/9 variants,
+A +0.78 vs +0.70, B -0.16 vs -0.22, neighbour 30/75/150 also better). Added to the paper demo as `best_fast_entries`
+(paper-v4), not to the bot. Failed: exits 5/10 and 20/40, entries 100/200/400, 3 and 5 ATR trailing stops,
+daily EMA20 gate, higher-lows gate, extra weekly gate, exit on daily EMA20.
