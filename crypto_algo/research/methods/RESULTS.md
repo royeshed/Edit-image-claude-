@@ -124,3 +124,19 @@ that bar, and pass holdouts A and B, and holdout C (coins 66-85, kept unused for
 
 The edge does not depend on Binance's prints (OKX gives the same 2023-25 result), protects well on small coins but
 earns little there, and does not carry over to traditional markets: it is a crypto, large-coin trend effect.
+
+## Year by year (research/methods/yearly.py; live universe, data to 2025-09)
+
+| year | bot | bot maxDD | BTC | 15 coins held | invested | trend on | trades | won | avg win / loss | best trade |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 2019 | +27% | -14% | +94% | +61% | 10% | 34% | 60 | 45% | +14% / -6% | +42% |
+| 2020 | +230% | -23% | +302% | +157% | 32% | 60% | 250 | 51% | +13% / -4% | +102% |
+| 2021 | +432% | -23% | +60% | +370% | 29% | 62% | 198 | 57% | +19% / -7% | +309% |
+| 2022 | -8% | -15% | -64% | -85% | 8% | 21% | 62 | 32% | +12% / -6% | +80% |
+| 2023 | +18% | -28% | +156% | +81% | 24% | 51% | 177 | 43% | +8% / -5% | +47% |
+| 2024 | +78% | -26% | +121% | +48% | 21% | 52% | 172 | 47% | +12% / -5% | +89% |
+| 2025 to Sep | +2% | -22% | +22% | +7% | 19% | 49% | 132 | 39% | +9% / -5% | +51% |
+
+Falls are not what hurt: in 2022 the bot sat in cash (8% invested) and lost 8% while the coins lost 85%. 2023-25 were
+rising, BTC-led markets with no altcoin season: fewer winning breakouts (39-47% vs 51-57%), smaller wins (+8-12% vs
++13-19%) and no giant trend (best +89% vs +309% in 2021). The same pattern as 2019, the last BTC-led recovery.
