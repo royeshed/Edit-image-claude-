@@ -78,6 +78,7 @@ def starters(lab, p=1.0) -> dict:
 
     return {
         "start_cvd_accumulation": lambda: (lambda q, t, cvd: (cvd > cvd.shift(n(30))) & flat(30))(*flow()),
+        # note: "taker buy share > 50% over 30 bars" is the same condition as CVD rising over 30 bars (identical results)
         "start_taker_buying_flat": lambda: (lambda q, t, _: (t.rolling(n(30)).sum() / q.rolling(n(30)).sum() > 0.5) & flat(30))(*flow()),
         "start_wyckoff_spring": spring,
         "start_sweep_reclaim": sweep_reclaim,
