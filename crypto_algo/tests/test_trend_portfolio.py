@@ -108,3 +108,39 @@ def test_top_k_holds_only_the_strongest_trending_coins():
     assert w.max() <= 1 / 4 + 1e-12 and w.sum() <= 1 + 1e-12   # risk dial caps each coin
     plain = breakout_weights(bars, PortfolioConfig(strategy="breakout", symbols=list(closes.columns)))
     assert plain["C3/USDT"] == pytest.approx(1 / 5)            # default: fixed 1/N sleeves
+
+
+def test_skip_weekend_blocks_only_breakouts_on_weekend_candles():
+    from algo.trend_portfolio import breakout_weights
+
+    def last_breakout(end):
+        idx = pd.date_range(end=end, periods=400, freq="4h", tz="UTC")
+        c = pd.Series(100 + 0.1 * np.sin(np.arange(400)), index=idx)
+        c.iloc[-1] = 110                                     # a breakout on the last (just closed) candle
+        closes = pd.DataFrame({"A/USDT": c})
+        return {"close": closes, "high": closes, "low": closes}
+
+    cfg = PortfolioConfig(strategy="breakout", symbols=["A/USDT"])
+    no_wk = PortfolioConfig(strategy="breakout", symbols=["A/USDT"], skip_weekend=True)
+    sat = last_breakout("2024-06-08 00:00")                  # Saturday 00:00 candle, closes Saturday 04:00
+    wed = last_breakout("2024-06-05 00:00")
+    assert breakout_weights(sat, cfg)["A/USDT"] > 0
+    assert breakout_weights(sat, no_wk)["A/USDT"] == 0
+    assert breakout_weights(wed, no_wk)["A/USDT"] == breakout_weights(wed, cfg)["A/USDT"] > 0
+
+
+def test_core_holds_a_full_slot_only_above_the_daily_sma():
+    from algo.trend_portfolio import with_core
+
+    idx = pd.date_range("2024-01-01", periods=6 * 400, freq="4h", tz="UTC")
+    t = np.arange(len(idx))
+    closes = pd.DataFrame({"BTC/USDT": 100 * np.exp(t * 0.0005), "ETH/USDT": 100 * np.exp(-t * 0.0005), "X/USDT": 100.0}, index=idx)
+    bars = {"close": closes}
+    cfg = PortfolioConfig(strategy="breakout", max_slots=6, core=("BTC/USDT", "ETH/USDT"))
+    w = with_core(pd.Series({"X/USDT": 1 / 6, "ETH/USDT": 0.1}), bars, cfg)
+    assert w["BTC/USDT"] == pytest.approx(1 / 6)     # above its 200-day SMA: full slot
+    assert w["ETH/USDT"] == pytest.approx(0.1)       # below: the bot's own weight is kept, nothing added
+    assert w["X/USDT"] == pytest.approx(1 / 6)
+    full = with_core(pd.Series({f"C{i}/USDT": 1 / 6 for i in range(6)}), bars, cfg)
+    assert full.sum() == pytest.approx(1.0) and full["BTC/USDT"] == pytest.approx(1 / 7)   # scaled to 100%
+    assert with_core(pd.Series({"X/USDT": 0.2}), bars, PortfolioConfig())["X/USDT"] == 0.2  # no core: unchanged

@@ -37,7 +37,7 @@ import pandas as pd
 from . import universe as uni
 from .broker import OrderRejected
 from .data import fetch_ohlcv
-from .htf import confirmation, confirmed_breakouts
+from .htf import align, confirmation, confirmed_breakouts, resample
 from .profile import atr_panel, cmf_panel, volume_profile
 
 log = logging.getLogger(__name__)
@@ -68,6 +68,9 @@ class PortfolioConfig:
     atr_expansion: bool = False      # breakout: enter only while ATR(5) > ATR(20) (volatility expanding)
     cmf_exit: float | None = None    # breakout: exit when Chaikin money flow(20) falls below this (e.g. -0.1)
     breakout_volume: float | None = None  # breakout: enter only when the candle's volume > this x its 20-candle average
+    skip_weekend: bool = False       # breakout: no entries on candles closing on Saturday or Sunday (UTC)
+    core: tuple = ()                 # coins held at a full slot while their daily close > the core_sma_days SMA
+    core_sma_days: int = 200
     universe: str = "fixed"          # "fixed" (trade `symbols`) or "mature_volume" (re-chosen each refresh, algo/universe.py)
     universe_size: int = 15
     universe_min_age: int = 365      # days of uninterrupted daily history a coin needs to be chosen
@@ -110,6 +113,10 @@ def breakout_weights(bars: dict[str, pd.DataFrame], cfg: PortfolioConfig) -> pd.
         vol = bars["volume"]
         loud = vol > cfg.breakout_volume * vol.rolling(20).mean().shift()
         entry_ok = loud if entry_ok is None else entry_ok & loud
+    if cfg.skip_weekend:
+        weekday = (c.index + pd.Timedelta("4h")).dayofweek
+        ok = pd.DataFrame(np.repeat(~np.isin(weekday, (5, 6))[:, None], c.shape[1], axis=1), index=c.index, columns=c.columns)
+        entry_ok = ok if entry_ok is None else entry_ok & ok
     if cfg.cmf_exit is not None:
         out = cmf_panel(bars["high"], bars["low"], c, bars["volume"]) < cfg.cmf_exit
         exit_now = out if exit_now is None else exit_now | out
@@ -123,6 +130,20 @@ def breakout_weights(bars: dict[str, pd.DataFrame], cfg: PortfolioConfig) -> pd.
         size = size.where(keep, 0.0)
     slots = cfg.max_slots or live.sum()
     return size / max(size.sum(), slots)
+
+
+def with_core(weights: pd.Series, bars: dict[str, pd.DataFrame], cfg: PortfolioConfig) -> pd.Series:
+    """Raise each core coin to a full slot (1/max_slots) while its last completed daily close is above its
+    `core_sma_days` SMA; the whole book is scaled down if it would exceed 100%."""
+    core = [s for s in cfg.core if s in bars["close"].columns]
+    if not core:
+        return weights
+    c = bars["close"]
+    d = resample({"close": c[core]}, "1d")["close"]
+    on = align((d > d.rolling(cfg.core_sma_days).mean()).astype(float), c.index, "1d").fillna(0.0).iloc[-1]
+    w = weights.reindex(weights.index.union(core)).fillna(0.0)
+    w[core] = np.maximum(w[core], on[core] / (cfg.max_slots or 6))
+    return w / max(w.sum(), 1.0)
 
 
 def target_weights(closes: pd.DataFrame, cfg: PortfolioConfig) -> pd.Series:
@@ -309,7 +330,7 @@ class PortfolioTrader:
         if str(last) == self.last_decision:
             return False
         if self.cfg.strategy == "breakout":
-            weights = breakout_weights(bars, self.cfg)
+            weights = with_core(breakout_weights(bars, self.cfg), bars, self.cfg)
         else:
             if last.hour != self.cfg.decide_hour:
                 return False
@@ -326,12 +347,13 @@ class PortfolioTrader:
         if str(candle) == self.last_decision:
             return False
         universe = self.symbols_for(candle)
-        bars = self.bars(list(dict.fromkeys(universe + self.positions)))
+        bars = self.bars(list(dict.fromkeys(universe + self.positions + list(self.cfg.core))))
         closes = bars["close"]
         if closes.empty or closes.index[-1] != candle:  # data not there yet: try again on the next poll
             return False
         live = [s for s in universe if s in closes.columns]
         weights = breakout_weights({k: v[live] for k, v in bars.items()}, self.cfg).reindex(closes.columns).fillna(0.0)
+        weights = with_core(weights, bars, self.cfg).reindex(closes.columns).fillna(0.0)
         prices = closes.ffill().iloc[-1]
         self.rebalance(weights, prices, frozen=set(closes.columns[closes.iloc[-1].isna()]))
         _, held = self.broker.balances(list(closes.columns))

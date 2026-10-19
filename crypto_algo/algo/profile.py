@@ -42,7 +42,8 @@ def volume_profile(high: pd.DataFrame, low: pd.DataFrame, close: pd.DataFrame, v
             vah[t, j] = edges[keep.max() + 1]
             val[t, j] = edges[keep.min()]
     hold = round(pd.Timedelta("1D") / step) if step <= pd.Timedelta("1D") else 1
-    mk = lambda a: pd.DataFrame(a, index=close.index, columns=close.columns).ffill(limit=hold - 1)
+    mk = lambda a: pd.DataFrame(a, index=close.index, columns=close.columns).ffill(limit=hold - 1) if hold > 1 else \
+        pd.DataFrame(a, index=close.index, columns=close.columns)
     return (mk(poc), mk(vah), mk(val)) if with_val else (mk(poc), mk(vah))
 
 

@@ -84,7 +84,7 @@
     "universe_calendar": "Q-jan"
   },
   "paper": {
-    "start": "2026-10-19 16:00",
+    "start": "2026-10-20 00:00",
     "capital": 10000,
     "profiles": {
       "best": {
@@ -113,6 +113,26 @@
           50,
           100
         ]
+      },
+      "best_no_weekend": {
+        "top_k": 6,
+        "volume_profile": true,
+        "atr_expansion": true,
+        "cmf_exit": -0.1,
+        "breakout_volume": 2.0,
+        "skip_weekend": true
+      },
+      "best_core_btc_eth": {
+        "top_k": 6,
+        "volume_profile": true,
+        "atr_expansion": true,
+        "cmf_exit": -0.1,
+        "breakout_volume": 2.0,
+        "core": [
+          "BTC/USDT",
+          "ETH/USDT"
+        ],
+        "core_sma_days": 200
       }
     }
   }
