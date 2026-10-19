@@ -101,6 +101,18 @@
         "cmf_exit": -0.1,
         "breakout_volume": 2.0,
         "universe_calendar": "monthly"
+      },
+      "best_fast_entries": {
+        "top_k": 6,
+        "volume_profile": true,
+        "atr_expansion": true,
+        "cmf_exit": -0.1,
+        "breakout_volume": 2.0,
+        "entries": [
+          20,
+          50,
+          100
+        ]
       }
     }
   }
