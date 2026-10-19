@@ -65,3 +65,26 @@ Passed all tests: faster breakout channels 20/50/100 (train Sharpe 1.91 vs 1.83,
 A +0.78 vs +0.70, B -0.16 vs -0.22, neighbour 30/75/150 also better). Added to the paper demo as `best_fast_entries`
 (paper-v4), not to the bot. Failed: exits 5/10 and 20/40, entries 100/200/400, 3 and 5 ATR trailing stops,
 daily EMA20 gate, higher-lows gate, extra weekly gate, exit on daily EMA20.
+
+## Market-ideas batch (research/methods/market_ideas.py), October 2026
+
+9 ideas taken from well-known systems (Connors RSI-2 dip sleeve, Turtle pyramiding, Faber 200-day BTC/ETH core,
+Fear & Greed filter, weekend breakouts, same-hour RVOL, strong-close breakout bar, not-overextended, Freqtrade-style
+cooldown after a loss). The data was cut at 2025-10-01 before loading (Lab.truncate), so the locked year was not read.
+Baseline reproduced: train Sharpe 1.83 / +97% / -24%, A +0.70, B -0.22. Leak check 0.0.
+
+| idea | train Sh / CAGR / DD | beats | A | B | plateau |
+|---|---|---|---|---|---|
+| dip_sleeve_rsi2 | 1.41 / +73% / -35% | 0/9 | +0.24 | -0.60 | no |
+| pyramid_after_1atr | 1.71 / +86% / -24% | 0/9 | +0.60 | -0.09 | no |
+| core_btc_eth_200d | 1.75 / +101% / -29% | 0/9 | +1.02 | +0.30 | no |
+| fear_greed_below_80 | 1.78 / +69% / -24% | 1/9 | +0.59 | -0.38 | no |
+| skip_weekend_breakouts | 2.01 / +92% / -21% | 9/9 | +0.60 | +0.05 | ok |
+| rvol_same_hour | 1.66 / +81% / -30% | 0/9 | +0.61 | +0.01 | no |
+| strong_close | 1.87 / +86% / -24% | 3/9 | +0.84 | -0.05 | ok |
+| not_overextended | 1.70 / +75% / -26% | 0/9 | +0.33 | +0.28 | no |
+| cooldown_after_loss | 1.70 / +78% / -24% | 0/9 | +0.75 | -0.05 | no |
+
+Nothing passed; the bot stays as it is. Near misses, not to be re-tuned on the same data: skipping weekend breakouts
+(passed train, B and plateau, failed A 0.60 vs 0.70) and the BTC/ETH 200-day core (worse on train, better on both
+holdouts: it helped in the BTC-led 2023-25 market). Both could only be revisited as forward (paper) evidence.
