@@ -84,26 +84,23 @@
     "universe_calendar": "Q-jan"
   },
   "paper": {
-    "start": "2026-10-18 16:00",
+    "start": "2026-10-19 16:00",
     "capital": 10000,
     "profiles": {
-      "standard": {},
-      "aggressive": {
-        "top_k": 6
-      },
-      "standard_profile": {
-        "volume_profile": true
-      },
-      "aggressive_profile": {
-        "top_k": 6,
-        "volume_profile": true
-      },
-      "aggressive_best": {
+      "best": {
         "top_k": 6,
         "volume_profile": true,
         "atr_expansion": true,
         "cmf_exit": -0.1,
         "breakout_volume": 2.0
+      },
+      "best_monthly": {
+        "top_k": 6,
+        "volume_profile": true,
+        "atr_expansion": true,
+        "cmf_exit": -0.1,
+        "breakout_volume": 2.0,
+        "universe_calendar": "monthly"
       }
     }
   }
