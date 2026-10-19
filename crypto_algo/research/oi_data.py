@@ -24,13 +24,13 @@ S.mount("https://", requests.adapters.HTTPAdapter(pool_connections=64, pool_maxs
 
 
 def get(sym: str, day: str):
-    for attempt in range(3):
+    for attempt in range(4):
         try:
             r = S.get(BASE.format(s=sym, d=day), timeout=30)
             break
         except requests.RequestException:
-            if attempt == 2:
-                return None
+            if attempt == 3:
+                raise
     if r.status_code != 200:
         return None
     with zipfile.ZipFile(io.BytesIO(r.content)) as z:
@@ -38,7 +38,12 @@ def get(sym: str, day: str):
 
 
 def exists(sym: str, day: str) -> bool:
-    return S.head(BASE.format(s=sym, d=day), timeout=30).status_code == 200
+    for attempt in range(4):
+        try:
+            return S.head(BASE.format(s=sym, d=day), timeout=30).status_code == 200
+        except requests.RequestException:
+            if attempt == 3:
+                raise
 
 
 def first_day(sym: str):
@@ -88,8 +93,13 @@ def coin(spot: str):
 if __name__ == "__main__":
     OUT.mkdir(parents=True, exist_ok=True)
     coins = open(sys.argv[1]).read().split()
+    def safe(c):
+        try:
+            coin(c)
+        except Exception as e:      # a coin that keeps failing is retried on the next run (no file written)
+            print(c, "failed", e, flush=True)
     with ThreadPoolExecutor(14) as ex:
-        for i, _ in enumerate(ex.map(coin, coins)):
+        for i, _ in enumerate(ex.map(safe, coins)):
             if i % 10 == 0:
                 print(i, len(coins), flush=True)
     print("done")
