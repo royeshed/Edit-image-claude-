@@ -144,5 +144,40 @@ def main():
     print("\nCHOSEN:", chosen or "nothing - keep the current best bot")
 
 
+def final():
+    """Holdout check of the chosen combination, then the ONE look at the locked year (2025-10-01..now).
+    Adoption rule fixed before running: the combination's median Sharpe on the locked year must beat the current bot's."""
+    lab = Lab.load()
+    install(lab)
+    ch = json.load(open("data/methods/structure_choice.json"))["chosen"]
+    models = {"current best": {}, "monthly refresh": {"refresh": "monthly"}, "inverse-vol 0.7": {"sizing": {"ivol": 0.7}}, "both": ch}
+    lock = (pd.Timestamp("2025-10-01", tz="UTC"), pd.Timestamp("2100-01-01", tz="UTC"))
+    full = (TRAIN[0], lock[1])
+    rows = []
+    for name, cfg in models.items():
+        fn = make(cfg)
+        tr, h, lk = run(lab, fn, *TRAIN), run(lab, fn, *HOLD), run(lab, fn, *lock)
+        A, B = hold(lab, fn, (25, 45)), hold(lab, fn, (45, 65))
+        w = fn(lab, 15, "Q-jan")
+        p = lab.pnl(w)
+        yr = {str(y): float((1 + p[(p.index >= max(TRAIN[0], pd.Timestamp(f"{y}-01-01", tz="UTC"))) & (p.index < pd.Timestamp(f"{y + 1}-01-01", tz="UTC"))].fillna(0)).prod() - 1)
+              for y in range(2019, 2027)}
+        f = metrics(p, *full)
+        days = (lab.index[-1] - lock[0]).days
+        tot = [(1 + c) ** (days / 365) - 1 for c in lk.cagr]
+        rows.append({"model": name, "train_sharpe": tr.sharpe.median(), "train_cagr": tr.cagr.median(), "train_dd": tr.maxdd.median(),
+                     "hold_sharpe": h.sharpe.median(), "hold_cagr": h.cagr.median(), "hold_dd": h.maxdd.median(), "A": A, "B": B,
+                     "lock_sharpe": lk.sharpe.median(), "lock_return": float(np.median(tot)), "lock_dd": lk.maxdd.median(),
+                     "full_cagr_n15_qjan": f["cagr"], "full_dd_n15_qjan": f["maxdd"], **yr})
+        print(rows[-1], flush=True)
+    t = pd.DataFrame(rows)
+    t.to_csv("data/methods/structure_final.csv", index=False)
+    pd.set_option("display.width", 250)
+    print(t.round(3).to_string(index=False))
+    adopt = t.set_index("model").lock_sharpe["both"] > t.set_index("model").lock_sharpe["current best"]
+    print("\nADOPT" if adopt else "\nKEEP CURRENT", "(rule: combination's locked-year median Sharpe must beat the current bot)")
+
+
 if __name__ == "__main__":
-    main()
+    import sys
+    final() if sys.argv[1:] == ["final"] else main()
