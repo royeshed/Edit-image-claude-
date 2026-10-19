@@ -41,3 +41,19 @@ What we learned:
   it would need forward (paper) evidence.
 - Simple beat complex: the current Donchian / daily-gate / top-3-momentum bot survived nine families
   of alternatives.
+
+## Structure batch on the best bot (research/methods/structure.py), October 2026
+
+11 ideas (universe, sizing, ranking) on top of the aggressive volume-profile bot; protocol in the module docstring.
+Passed all pre-lock tests: monthly universe refresh, inverse-vol sizing 0.7. Greedy train combination = both.
+One look at the locked year (2025-10-01..now), rule fixed before: the combination's median Sharpe must beat the current bot.
+
+| model | train Sharpe / CAGR / DD | 2023-25.09 Sharpe / CAGR / DD | locked year Sharpe / return / DD |
+|---|---|---|---|
+| current best | 1.83 / +97% / -24% | 1.10 / +33% / -28% | 1.39 / +31% / -13% |
+| monthly refresh | 1.89 / +96% / -24% | 1.16 / +35% / -29% | 1.49 / +41% / -11% |
+| inverse-vol 0.7 | 1.89 / +62% / -17% | 1.09 / +27% / -26% | 1.18 / +22% / -12% |
+| both (declared candidate) | 1.91 / +63% / -17% | 1.13 / +28% / -23% | 1.22 / +26% / -10% |
+
+Decision: the declared combination fails, so the current bot is kept. Monthly refresh alone was better on every
+period including the locked year, but that is an after-the-fact reading of the one look; it needs forward (paper) evidence.
