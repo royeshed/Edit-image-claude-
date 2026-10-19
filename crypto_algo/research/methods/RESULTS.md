@@ -88,3 +88,39 @@ Baseline reproduced: train Sharpe 1.83 / +97% / -24%, A +0.70, B -0.22. Leak che
 Nothing passed; the bot stays as it is. Near misses, not to be re-tuned on the same data: skipping weekend breakouts
 (passed train, B and plateau, failed A 0.60 vs 0.70) and the BTC/ETH 200-day core (worse on train, better on both
 holdouts: it helped in the BTC-led 2023-25 market). Both could only be revisited as forward (paper) evidence.
+
+## Costs, deflated Sharpe and new data (October 2026; data cut at 2025-10-01, nothing tuned)
+
+**Costs** (`research/methods/costs.py`, best bot, median of 9 variants). The bot trades 41x (train) / 52x (2023-25.09)
+its equity a year, so 0.12% per side costs 4.9% / 6.2% of equity a year.
+
+| scenario | train CAGR / Sharpe | 2023-25.09 CAGR / Sharpe |
+|---|---|---|
+| now, 0.12% per side | +97.2% / 1.83 | +32.7% / 1.10 |
+| fees paid in BNB, 0.095% | +99.5% / 1.85 | +33.8% / 1.14 |
+| BNB + limit orders (buys and sells) | +94.2% / 1.83 | +29.8% / 1.03 |
+| zero cost (ceiling) | +107.7% / 1.93 | +40.6% / 1.26 |
+| now + 5% a year on idle USDT | +105.1% / 1.96 | +38.3% / 1.23 |
+| BNB + 5% on idle USDT | +107.8% / 1.98 | +39.4% / 1.26 |
+
+Limit orders at the decision close fill 97% of the time, but the 3% that do not are the breakouts that run away,
+and missing them costs more than the spread saved: keep market orders. BNB fees and interest on idle cash both help.
+
+**Deflated Sharpe** (`research/methods/deflated.py`, 15 coins, Q-jan). With 350 trials and a trial spread of 0.15-0.30,
+luck alone reaches a Sharpe of 0.44-0.88. Train Sharpe 2.03: DSR 99-100%. 2023-25.09 Sharpe 0.97: DSR 56-81%, so the
+recent edge is real but not yet statistically strong. Noise bar for a new idea's train gain: about 0.25-0.5 Sharpe as the
+best of 140 ideas (0.36 for the weekend idea, which gained only +0.15). New rule for future ideas: a train gain above
+that bar, and pass holdouts A and B, and holdout C (coins 66-85, kept unused for this purpose from now on).
+
+**New data, unchanged bot** (`research/methods/newdata.py`):
+
+| test | bot | comparison |
+|---|---|---|
+| coins 66-85 (never used), 2018-11..2022 | -1%/yr, Sharpe -0.01, DD -24% | equal-weight hold -28%/yr, DD -85% |
+| coins 66-85, 2023-01..2025-09 | +26%/yr, Sharpe 0.79, DD -37% | equal-weight hold +8%/yr, DD -76%; BTC +102%/yr |
+| OKX prices (64 coins, 81% coverage), train | +52%, Sharpe 1.46 | same coins on Binance: +68%, 1.65 |
+| OKX prices, 2023-01..2025-09 | +31%, Sharpe 0.98 | Binance: +31%, 0.96 |
+| 38 ETFs, daily, 2008-2025.09 | +1%/yr, Sharpe 0.26 | SPY +11%/yr 0.61; 60/40 +8% 0.75 |
+
+The edge does not depend on Binance's prints (OKX gives the same 2023-25 result), protects well on small coins but
+earns little there, and does not carry over to traditional markets: it is a crypto, large-coin trend effect.
