@@ -141,10 +141,14 @@ def hold(lab, sig_fn, ranks):
 
 def main():
     lab = Lab.load()
-    I3.install(lab)
-    filt_main, filt_nb = oi_filters(lab, 1.0), oi_filters(lab, 1.3)
-    old = I.candidates
-    I.candidates = lambda l: {**old(l), **filt_main, **{k + "__nb": v for k, v in filt_nb.items()}}
+    filt_main = oi_filters(lab, 1.0)
+    orig = I.candidates
+
+    def cands(l):                   # built from the lab passed in, so the look-ahead check sees truncated data
+        v = l.volume.astype(float)
+        return {**orig(l), "relvol_2.0x": ("entry", lambda: v > 2.0 * v.rolling(20).mean().shift()),
+                **oi_filters(l, 1.0), **{k + "__nb": f for k, f in oi_filters(l, 1.3).items()}}
+    I.candidates = cands
 
     def sig_start(name, p=1.0, frac=FRAC):
         def f(l):
